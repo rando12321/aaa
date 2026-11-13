@@ -47,6 +47,8 @@ class Element:
             self.handle.press('Control+' + keys[1])
         elif keys == (Keys.BACKSPACE,):
             self.handle.press('Backspace')
+        elif keys == (Keys.TAB,):
+            self.handle.press('Tab')
         elif keys == (Keys.ENTER,):
             self.handle.press('Enter')
         elif keys == (Keys.SHIFT, Keys.ENTER):

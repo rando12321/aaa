@@ -30,7 +30,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-VERSAO = "2026.11.13-v4-reabrir-apos-salvar"
+VERSAO = "2026.11.13-v5-telefone-do-formulario"
 
 IGNORADOS = {"11999999999", "5511999999999"}
 
@@ -781,8 +781,9 @@ class App:
             campo = self.esperar(self.campo_nome)
         self.definir_etapa("Conferindo telefone do formulário...")
         painel = self.painel_formulario(campo)
-        if not painel or not self.telefone_no_painel(painel, numero):
-            raise RuntimeError("Não foi possível confirmar o telefone do formulário. Cadastro bloqueado.")
+        if not painel:
+            raise RuntimeError("Não identifiquei o painel Novo contato. Cadastro bloqueado; veja o diagnóstico.")
+        self.conferir_telefone_formulario(painel, numero)
         self.conferir_parada()
         campo.click()
         modificador = Keys.COMMAND if self.driver.capabilities.get('platformName', '').lower() == 'mac' else Keys.CONTROL
@@ -1010,7 +1011,7 @@ class App:
             r"""
             const ancestors = [];
             let p = arguments[0].parentElement;
-            while (p && p !== document.body && !['app', 'main', 'side'].includes(p.id)) {
+            while (p && p !== document.body && !['app', 'side'].includes(p.id)) {
                 ancestors.push(p);
                 p = p.parentElement;
             }
@@ -1018,6 +1019,12 @@ class App:
             if (semantic) return semantic;
             for (const e of ancestors) {
                 const text = (e.innerText || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+                const fields = [...e.querySelectorAll('input, [contenteditable="true"][role="textbox"]')]
+                    .filter(f => f.getClientRects().length);
+                // The save action may only appear after Name is filled.
+                if (/novo contato|novo contacto|new contact|criar contato|create contact/.test(text)
+                    && /telefone|phone/.test(text) && fields.length >= 2
+                    && !e.querySelector('#side, footer')) return e;
                 const actions = [...e.querySelectorAll('button, [role="button"]')];
                 const save = actions.some(b => /^(salvar|save|guardar|concluir|done|salvar contato|save contact)$/i.test(
                     (b.getAttribute('aria-label') || b.innerText || '').trim()));
@@ -1026,23 +1033,90 @@ class App:
             return null;
             """, campo) or False
 
-    def telefone_no_painel(self, painel, numero):
-        valores = self.driver.execute_script(
-            r"""
+
+    def dados_telefone(self, painel, campos=False):
+        return self.driver.execute_script(r"""
             const p = arguments[0];
-            const values = [...p.querySelectorAll('input')].filter(e => e.getClientRects().length)
-                .map(e => e.value || '');
-            return values.concat((p.innerText || '').split(/\n/));
-            """, painel)
-        for valor in valores:
-            # Compare complete phone-like strings; do not accept arbitrary substrings.
+            const visible = e => e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden';
+            const norm = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+            const fields = [...p.querySelectorAll('input, [contenteditable="true"][role="textbox"]')].filter(visible);
+            const labels = e => [e.getAttribute('aria-label'), e.getAttribute('placeholder'),
+                e.getAttribute('name'), e.getAttribute('autocomplete'),
+                ...[...(e.labels || [])].map(l => l.innerText),
+                ...(e.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+                    .map(id => document.getElementById(id)?.innerText || '')].filter(Boolean).join(' ');
+            const country = fields.filter(e => /country|pais|tel-country-code/i.test(labels(e)))
+                .map(e => e.value || e.innerText || '');
+            const text = p.innerText || '';
+            country.push(...text.split(/\n/).filter(t => /^\s*(?:[A-Za-zÀ-ÿ ]+)?\s*\+\s*\d{1,3}\s*$/.test(t)));
+            const phone = fields.filter(e => {
+                const label = norm(labels(e));
+                if (/country|pais|tel-country-code|nome|name|sobrenome|username|usuario/.test(label)) return false;
+                if (e.type === 'tel' || /telefone|phone|tel-national/.test(label)) return true;
+                // Older builds render an ordinary input beside a visual label.
+                let parent = e.parentElement;
+                for (let i = 0; parent && parent !== p && i < 4; i++, parent = parent.parentElement) {
+                    const count = [...parent.querySelectorAll('input, [contenteditable="true"]')].filter(visible).length;
+                    if (count > 1) break;
+                    if (/numero de telefone|phone number/.test(norm(parent.innerText || ''))) return true;
+                }
+                return false;
+            });
+            if (arguments[1]) return phone;
+            return {country, values: phone.map(e => e.value ?? e.innerText ?? ''),
+                text: text.split(/\n/)};
+        """, painel, campos)
+
+    def numeros_do_painel(self, dados):
+        numeros = set()
+        # A non-Brazilian country selection must not be treated as +55.
+        codigos = [digitos(c) for c in dados['country'] if digitos(c)]
+        if any(c != '55' for c in codigos):
+            return numeros
+        for valor in dados['values'] + dados['text']:
             for candidato in re.findall(r'\+?\d[\d\s().-]{8,}\d', valor):
                 try:
-                    if numero_brasileiro(candidato) == numero:
-                        return True
+                    numeros.add(numero_brasileiro(candidato))
                 except ValueError:
                     pass
-        return False
+        return numeros
+
+    def telefone_no_painel(self, painel, numero):
+        dados = self.dados_telefone(painel)
+        return numero in self.numeros_do_painel(dados)
+
+    def conferir_telefone_formulario(self, painel, numero):
+        dados = self.dados_telefone(painel)
+        observados = self.numeros_do_painel(dados)
+        self.log(f"Telefone esperado: +{numero}; encontrado(s): " + (', '.join('+' + n for n in sorted(observados)) or 'não identificado'))
+        if observados == {numero}:
+            return
+        campos = self.dados_telefone(painel, campos=True)
+        pais = [digitos(c) for c in dados['country'] if digitos(c)]
+        if len(campos) != 1 or not pais or any(c != '55' for c in pais):
+            raise RuntimeError(f"Não foi possível confirmar o telefone do formulário: esperado +{numero}, encontrado(s) {sorted(observados)}. Cadastro bloqueado.")
+        campo = campos[0]
+        if not campo.is_enabled() or campo.get_attribute('readonly'):
+            raise RuntimeError("Telefone divergente e campo não editável. Cadastro bloqueado.")
+        self.definir_etapa("Preenchendo o telefone exato do CSV no campo brasileiro +55...")
+        self.conferir_parada()
+        campo.click()
+        modificador = Keys.COMMAND if self.driver.capabilities.get('platformName', '').lower() == 'mac' else Keys.CONTROL
+        campo.send_keys(modificador, 'a')
+        campo.send_keys(Keys.BACKSPACE)
+        campo.send_keys(numero[2:])
+        campo.send_keys(Keys.TAB)
+        def igual(driver):
+            atual = self.dados_telefone(painel)
+            valores = atual['values']
+            if len(valores) != 1:
+                return False
+            try:
+                return numero_brasileiro(valores[0]) == numero and self.numeros_do_painel(atual) == {numero}
+            except ValueError:
+                return False
+        self.esperar(igual, 10)
+        self.log(f"Telefone do formulário conferido após preenchimento: +{numero}.")
 
     def texto_editor(self, campo):
         return self.driver.execute_script(

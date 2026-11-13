@@ -189,3 +189,37 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(self.app.cadastro_confirmado, self.contact['phone'])
         self.app.enviar(self.contact, 'Sem fechar conversa com Escape')
         self.assertEqual(self.page.evaluate('window.sent'), 1)
+
+    def test_split_country_and_generic_phone_without_save_button(self):
+        self.open()
+        self.page.set_content('''<div id="main"><h2>Novo contato</h2>
+        <label>Nome<input aria-label="Nome"></label><label>Sobrenome<input aria-label="Sobrenome"></label>
+        <div><span>País</span><button>BR +55</button></div>
+        <div><span>Número de telefone</span><input value="79 98165-6650"></div></div>''')
+        campo = self.app.campo_nome(self.app.driver)
+        painel = self.app.painel_formulario(campo)
+        self.assertTrue(painel)
+        self.app.conferir_telefone_formulario(painel, '5579981656650')
+        self.assertTrue(self.app.telefone_no_painel(painel, '5579981656650'))
+
+    def test_displayed_missing_nine_is_replaced_with_exact_csv_number(self):
+        self.open()
+        self.page.set_content('''<form><h2>Novo contato</h2>
+        <label>Nome<input aria-label="Nome"></label><div>País<br><button type="button">BR +55</button></div>
+        <div><span>Número de telefone</span><input value="79 8165-6650"></div></form>''')
+        campo = self.app.campo_nome(self.app.driver)
+        painel = self.app.painel_formulario(campo)
+        self.assertFalse(self.app.telefone_no_painel(painel, '5579981656650'))
+        self.app.conferir_telefone_formulario(painel, '5579981656650')
+        self.assertEqual(self.page.locator('input').nth(1).input_value(), '79981656650')
+        self.assertTrue(self.app.telefone_no_painel(painel, '5579981656650'))
+
+    def test_non_brazilian_country_blocks_national_phone(self):
+        self.open()
+        self.page.set_content('''<form><h2>Novo contato</h2>
+        <label>Nome<input aria-label="Nome"></label><div>País<br><button>PT +351</button></div>
+        <label>Número de telefone<input type="tel" value="79981656650"></label></form>''')
+        painel = self.app.painel_formulario(self.app.campo_nome(self.app.driver))
+        with self.assertRaisesRegex(RuntimeError, 'Cadastro bloqueado'):
+            self.app.conferir_telefone_formulario(painel, '5579981656650')
+        self.assertEqual(self.page.locator('input[type=tel]').input_value(), '79981656650')
