@@ -30,7 +30,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-VERSAO = "2026.11.13-v12-fechar-pelo-x"
+VERSAO = "2026.11.13-v13-confirmar-descartar"
 
 IGNORADOS = {"11999999999", "5511999999999"}
 
@@ -822,7 +822,28 @@ class App:
                 return not campo.is_displayed()
             except StaleElementReferenceException:
                 return True
-        self.esperar(fechado, 5)
+        def descarte_ou_fechado(driver):
+            for dialogo in self.visiveis(PAINEIS):
+                texto = normalizar(dialogo.text)
+                if any(aviso in texto for aviso in (
+                    'deseja descartar as mudancas', 'descartar alteracoes',
+                    'discard changes', 'discard your changes',
+                )):
+                    descartar = self.acao_visivel(['Descartar', 'Discard'], [dialogo])
+                    return ('descartar', descartar, dialogo) if descartar else False
+            return ('fechado', None, None) if fechado(driver) else False
+        estado, descartar, dialogo = self.esperar(descarte_ou_fechado, 5)
+        if estado == 'descartar':
+            self.log("WhatsApp pediu confirmação para fechar. Clicando em Descartar apenas as alterações deste formulário.")
+            self.conferir_parada()
+            descartar.click()
+            def descartado(driver):
+                try:
+                    dialogo_fechado = not dialogo.is_displayed()
+                except StaleElementReferenceException:
+                    dialogo_fechado = True
+                return dialogo_fechado and fechado(driver)
+            self.esperar(descartado, 5)
         self.log("Novo contato fechado pelo X. Página preservada, sem F5.")
 
     def verificar_formulario_sem_salvar(self, contato):

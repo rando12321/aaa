@@ -397,3 +397,55 @@ class BrowserTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'Tempo esgotado'):
                 self.app.fechar_cadastro_pelo_x(campo)
             navigate.assert_not_called()
+
+    def add_discard_confirmation(self, prompt='Deseja descartar as mudanças?'):
+        self.page.evaluate('''prompt => {
+            const close=document.querySelector('button[aria-label=Fechar]');
+            const original=close.onclick;
+            close.onclick=()=>{
+                const modal=document.createElement('div');modal.setAttribute('role','dialog');
+                modal.style='position:fixed;inset:0;background:white;z-index:1000';
+                const question=document.createElement('p');question.textContent=prompt;modal.append(question);
+                const cancel=document.createElement('button');cancel.textContent='Cancelar';
+                cancel.onclick=()=>{window.cancelled=(window.cancelled||0)+1;modal.remove()};
+                const discard=document.createElement('button');discard.textContent='Descartar';
+                discard.onclick=()=>{window.discarded=(window.discarded||0)+1;original.call(close);modal.remove()};
+                modal.append(cancel,discard);document.body.append(modal);
+            };
+        }''', prompt)
+
+    def test_x_confirms_discard_once_then_closes_form(self):
+        self.app.abrir_e_detectar(self.contact['phone'])
+        self.add_discard_confirmation()
+        campo = self.app.campo_nome(self.app.driver)
+        with patch.object(self.app.driver, 'get') as navigate:
+            self.app.fechar_cadastro_pelo_x(campo)
+            navigate.assert_not_called()
+        self.assertEqual(self.page.evaluate('window.discarded'), 1)
+        self.assertIsNone(self.page.evaluate('window.cancelled'))
+        self.assertFalse(self.page.locator('#form').is_visible())
+
+    def test_x_does_not_discard_unrelated_confirmation(self):
+        self.app.abrir_e_detectar(self.contact['phone'])
+        self.add_discard_confirmation('Deseja excluir esta conversa?')
+        campo = self.app.campo_nome(self.app.driver)
+        original = self.app.esperar
+        self.app.esperar = lambda fn, segundos=30: original(fn, min(segundos, 1))
+        with self.assertRaisesRegex(RuntimeError, 'Tempo esgotado'):
+            self.app.fechar_cadastro_pelo_x(campo)
+        self.assertIsNone(self.page.evaluate('window.discarded'))
+        self.assertTrue(self.page.locator('#form').is_visible())
+
+    def test_recovery_discards_then_reopens_without_refresh(self):
+        html = HTML.replace("menu.hidden=true;document.getElementById('form').hidden=false",
+            "menu.hidden=true;document.getElementById('form').hidden=false;localStorage.opens=Number(localStorage.opens||0)+1;if(Number(localStorage.opens)===1)document.querySelector('#form button').remove()")
+        self.serve(html)
+        self.app.abrir_e_detectar(self.contact['phone'])
+        self.add_discard_confirmation()
+        original = self.app.esperar
+        self.app.esperar = lambda fn, segundos=30: original(fn, min(segundos, 1))
+        with patch.object(self.app.driver, 'get', side_effect=AssertionError('não deve recarregar')), patch.object(self.app, 'confirmar_aviso_cadastro', return_value=True):
+            self.app.cadastrar(self.contact)
+        self.assertEqual(self.page.evaluate('window.discarded'), 1)
+        self.assertEqual(self.page.evaluate('localStorage.opens'), '2')
+        self.assertEqual(self.app.cadastro_confirmado, self.contact['phone'])
