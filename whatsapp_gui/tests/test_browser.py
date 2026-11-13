@@ -459,3 +459,21 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(self.page.locator('input[aria-label=Sobrenome]').input_value(), 'Preservado')
         self.assertTrue(all(e['trusted'] for e in self.page.evaluate('window.keys')))
         self.assertGreaterEqual(self.page.evaluate('window.ups'), len('Ana 1234'))
+
+    def test_windows_name_routes_to_native_backend_and_restores_title(self):
+        self.open()
+        self.page.set_content('<title>WhatsApp Teste</title><label>Nome<input aria-label="Nome"></label><input aria-label="Sobrenome">')
+        teclado = Mock()
+        teclado.ativar.return_value = True
+        def native_type(nome, parar, foco):
+            self.assertTrue(foco())
+            self.page.keyboard.press('Control+A')
+            self.page.keyboard.press('Backspace')
+            self.page.keyboard.insert_text(nome)
+            self.page.keyboard.press('Tab')
+        teclado.digitar.side_effect = native_type
+        with patch('app.sistema_windows', return_value=True), patch('app.TecladoWindows', return_value=teclado), patch('app.ActionChains', side_effect=AssertionError('não deve enviar teclas pelo Selenium no Windows')):
+            self.app.digitar_nome('Ana 1234')
+        self.assertEqual(self.page.locator('input[aria-label=Nome]').input_value(), 'Ana 1234')
+        self.assertEqual(self.page.title(), 'WhatsApp Teste')
+        teclado.digitar.assert_called_once()

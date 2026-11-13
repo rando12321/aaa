@@ -30,7 +30,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-VERSAO = "2026.11.13-v14-nome-teclado-e-foco"
+VERSAO = "2026.11.13-v15-teclado-nativo-windows"
 
 IGNORADOS = {"11999999999", "5511999999999"}
 
@@ -213,6 +213,107 @@ def ler_csv(caminho):
         )
 
     return contatos, ignorados
+
+
+def sistema_windows():
+    return os.name == 'nt'
+
+
+class TecladoWindows:
+    """Windows SendInput. No stealth claims; injection remains observable by Windows."""
+    @staticmethod
+    def tipos_entrada():
+        import ctypes
+        WORD, DWORD, LONG = ctypes.c_uint16, ctypes.c_uint32, ctypes.c_int32
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [('wVk', WORD), ('wScan', WORD), ('dwFlags', DWORD), ('time', DWORD), ('dwExtraInfo', ctypes.c_size_t)]
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [('dx', LONG), ('dy', LONG), ('mouseData', DWORD), ('dwFlags', DWORD), ('time', DWORD), ('dwExtraInfo', ctypes.c_size_t)]
+        class HARDWAREINPUT(ctypes.Structure):
+            _fields_ = [('uMsg', DWORD), ('wParamL', WORD), ('wParamH', WORD)]
+        class PAYLOAD(ctypes.Union):
+            _fields_ = [('ki', KEYBDINPUT), ('mi', MOUSEINPUT), ('hi', HARDWAREINPUT)]
+        class INPUT(ctypes.Structure):
+            _anonymous_ = ('payload',)
+            _fields_ = [('type', DWORD), ('payload', PAYLOAD)]
+        return INPUT
+
+    def __init__(self):
+        import ctypes
+        if not sistema_windows():
+            raise RuntimeError('SendInput requer Windows.')
+        self.ctypes = ctypes
+        self.INPUT = self.tipos_entrada()
+        self.api = ctypes.WinDLL('user32', use_last_error=True)
+        self.enum_callback = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_ssize_t)
+        self.api.EnumWindows.argtypes = [self.enum_callback, ctypes.c_ssize_t]
+        self.api.EnumWindows.restype = ctypes.c_int
+        self.api.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+        self.api.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+        self.api.IsWindowVisible.argtypes = [ctypes.c_void_p]
+        self.api.GetForegroundWindow.restype = ctypes.c_void_p
+        self.api.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+        self.api.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self.api.SendInput.argtypes = [ctypes.c_uint32, ctypes.POINTER(self.INPUT), ctypes.c_int]
+        self.api.SendInput.restype = ctypes.c_uint32
+        self.janela = None
+
+    def ativar(self, marcador):
+        encontrados = []
+        @self.enum_callback
+        def janela(hwnd, extra):
+            titulo = self.ctypes.create_unicode_buffer(1024)
+            classe = self.ctypes.create_unicode_buffer(256)
+            self.api.GetWindowTextW(hwnd, titulo, len(titulo))
+            self.api.GetClassNameW(hwnd, classe, len(classe))
+            if self.api.IsWindowVisible(hwnd) and classe.value.startswith('Chrome_WidgetWin') and marcador in titulo.value:
+                encontrados.append(hwnd)
+            return 1
+        self.api.EnumWindows(janela, 0)
+        if len(encontrados) != 1:
+            return False
+        self.janela = encontrados[0]
+        if not self.em_primeiro_plano():
+            self.api.ShowWindow(self.janela, 9)
+            self.api.SetForegroundWindow(self.janela)
+        return self.em_primeiro_plano()
+
+    def em_primeiro_plano(self):
+        return bool(self.janela) and self.api.GetForegroundWindow() == self.janela
+
+    def enviar(self, eventos, conferir_foco):
+        if not self.em_primeiro_plano() or not conferir_foco():
+            raise RuntimeError('Chrome perdeu o primeiro plano ou o campo Nome perdeu o foco. Digitação nativa interrompida.')
+        entradas = (self.INPUT * len(eventos))()
+        for entrada, (vk, scan, flags) in zip(entradas, eventos):
+            entrada.type = 1
+            entrada.ki.wVk, entrada.ki.wScan, entrada.ki.dwFlags = vk, scan, flags
+        total = self.api.SendInput(len(entradas), entradas, self.ctypes.sizeof(self.INPUT))
+        if total != len(entradas):
+            # Release Control if Windows accepted only part of the shortcut.
+            soltar = self.INPUT()
+            soltar.type, soltar.ki.wVk, soltar.ki.dwFlags = 1, 0x11, 2
+            self.api.SendInput(1, self.ctypes.byref(soltar), self.ctypes.sizeof(self.INPUT))
+            raise RuntimeError('Windows recusou parte das teclas nativas. Confira a janela e suas permissões.')
+
+    def digitar(self, nome, parar, conferir_foco):
+        if parar.is_set():
+            raise InterruptedError()
+        self.enviar([(0x11, 0, 0), (0x41, 0, 0), (0x41, 0, 2), (0x11, 0, 2), (0x08, 0, 0), (0x08, 0, 2)], conferir_foco)
+        for caractere in nome:
+            if parar.is_set():
+                raise InterruptedError()
+            utf16 = caractere.encode('utf-16-le')
+            eventos = []
+            for indice in range(0, len(utf16), 2):
+                unidade = int.from_bytes(utf16[indice:indice + 2], 'little')
+                eventos.extend([(0, unidade, 4), (0, unidade, 6)])
+            self.enviar(eventos, conferir_foco)
+            if parar.wait(0.12):
+                raise InterruptedError()
+        if parar.is_set():
+            raise InterruptedError()
+        self.enviar([(0x09, 0, 0), (0x09, 0, 2)], conferir_foco)
 
 
 class App:
@@ -914,6 +1015,21 @@ class App:
                 raise
             return False
 
+    def digitar_nome_windows(self, campo, nome):
+        teclado = TecladoWindows()
+        marcador = 'WhatsApp CSV ' + secrets.token_hex(6)
+        titulo = self.driver.execute_script('const anterior=document.title; document.title=arguments[0]; return anterior;', marcador)
+        try:
+            self.esperar(lambda d: teclado.ativar(marcador), 3)
+            def foco():
+                return bool(self.driver.execute_script('return document.hasFocus() && (document.activeElement === arguments[0] || arguments[0].contains(document.activeElement));', campo))
+            teclado.digitar(nome, self.parar, foco)
+        finally:
+            try:
+                self.driver.execute_script('if(document.title===arguments[0])document.title=arguments[1];', marcador, titulo)
+            except Exception:
+                pass
+
     def digitar_nome(self, nome):
         self.definir_etapa("Digitando Nome caractere por caractere e conferindo após sair do campo...")
         campo = self.esperar(self.campo_nome)
@@ -927,14 +1043,18 @@ class App:
         focado = self.driver.execute_script("return document.activeElement === arguments[0] || arguments[0].contains(document.activeElement);", campo)
         if not focado:
             raise RuntimeError("O clique não deu foco ao campo Nome. Digitação interrompida.")
-        self.log("Foco confirmado no campo Nome. Digitando com teclas pressionadas e soltas.")
-        modificador = Keys.COMMAND if self.driver.capabilities.get('platformName', '').lower() == 'mac' else Keys.CONTROL
-        ActionChains(self.driver).key_down(modificador).send_keys('a').key_up(modificador).send_keys(Keys.BACKSPACE).perform()
-        for caractere in nome:
+        if sistema_windows():
+            self.log("Nome: usando entrada nativa Windows SendInput; mantenha o Chrome em primeiro plano.")
+            self.digitar_nome_windows(campo, nome)
+        else:
+            self.log("Foco confirmado no campo Nome. Digitando com teclas pressionadas e soltas.")
+            modificador = Keys.COMMAND if self.driver.capabilities.get('platformName', '').lower() == 'mac' else Keys.CONTROL
+            ActionChains(self.driver).key_down(modificador).send_keys('a').key_up(modificador).send_keys(Keys.BACKSPACE).perform()
+            for caractere in nome:
+                self.conferir_parada()
+                ActionChains(self.driver).send_keys(caractere).pause(0.12).perform()
             self.conferir_parada()
-            ActionChains(self.driver).send_keys(caractere).pause(0.12).perform()
-        self.conferir_parada()
-        ActionChains(self.driver).send_keys(Keys.TAB).perform()
+            ActionChains(self.driver).send_keys(Keys.TAB).perform()
         if self.parar.wait(0.4):
             raise InterruptedError()
         def mantido(driver):
