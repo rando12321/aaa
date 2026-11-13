@@ -158,3 +158,34 @@ class BrowserTests(unittest.TestCase):
             self.app.cadastrar(self.contact)
         self.assertIsNone(self.app.cadastro_confirmado)
         self.assertIsNone(self.page.evaluate('window.sent'))
+
+    def test_save_returns_home_then_reopens_and_sends_once(self):
+        html = HTML.replace("localStorage.saved='yes';form.hidden=true;document.getElementById('action').textContent='Editar contato'",
+            "localStorage.saved='yes';localStorage.saves=Number(localStorage.saves||0)+1;form.hidden=true;document.getElementById('main').remove()")
+        self.serve(html)
+        self.app.abrir_e_detectar(self.contact['phone'])
+        self.app.cadastrar(self.contact)
+        self.assertEqual(self.app.cadastro_confirmado, self.contact['phone'])
+        self.assertEqual(self.page.evaluate('localStorage.saves'), '1')
+        self.app.enviar(self.contact, 'Mensagem após retornar da tela inicial')
+        self.assertEqual(self.page.evaluate('window.sent'), 1)
+        self.assertEqual(self.page.evaluate('localStorage.saves'), '1')
+
+    def test_home_return_without_saved_contact_blocks_send(self):
+        html = HTML.replace("localStorage.saved='yes';form.hidden=true;document.getElementById('action').textContent='Editar contato'",
+            "form.hidden=true;document.getElementById('main').remove()")
+        self.serve(html)
+        self.app.abrir_e_detectar(self.contact['phone'])
+        with self.assertRaisesRegex(RuntimeError, 'cadastro não foi confirmado'):
+            self.app.cadastrar(self.contact)
+        self.assertIsNone(self.app.cadastro_confirmado)
+        self.assertIsNone(self.page.evaluate('window.sent'))
+
+    def test_escape_without_overlay_would_close_chat(self):
+        html = HTML.replace("if(e.key==='Escape') menu.hidden=true", "if(e.key==='Escape'){if(menu.hidden) document.getElementById('main')?.remove();else menu.hidden=true;}")
+        self.serve(html)
+        self.app.abrir_e_detectar(self.contact['phone'])
+        self.app.cadastrar(self.contact)
+        self.assertEqual(self.app.cadastro_confirmado, self.contact['phone'])
+        self.app.enviar(self.contact, 'Sem fechar conversa com Escape')
+        self.assertEqual(self.page.evaluate('window.sent'), 1)

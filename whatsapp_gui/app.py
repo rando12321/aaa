@@ -30,7 +30,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-VERSAO = "2026.11.13-v3-sem-espera-contato-salvo"
+VERSAO = "2026.11.13-v4-reabrir-apos-salvar"
 
 IGNORADOS = {"11999999999", "5511999999999"}
 
@@ -799,8 +799,12 @@ class App:
             except StaleElementReferenceException:
                 return True
         self.esperar(fechado)
+        # Saving may return WhatsApp to its home screen. Escape with no open
+        # overlay can also close a chat, so navigate instead of dismissing blindly.
+        self.definir_etapa("Reabrindo o destinatário após salvar o contato...")
+        self.driver.get("https://web.whatsapp.com/send?" + urlencode({"phone": numero}))
+        self.esperar(self.conversa_ou_recusa, 90)
         self.definir_etapa("Confirmando cadastro salvo pela opção Editar contato...")
-        self.fechar_sobreposicoes()
         estado, _ = self.detectar_estado_contato()
         self.fechar_sobreposicoes()
         if estado != "existente":
