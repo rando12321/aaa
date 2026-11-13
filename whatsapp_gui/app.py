@@ -30,7 +30,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-VERSAO = "2026.11.13-v7-recuperar-formulario"
+VERSAO = "2026.11.13-v8-nome-curto-digitado"
 
 IGNORADOS = {"11999999999", "5511999999999"}
 
@@ -121,10 +121,7 @@ def gerar_nome():
     primeiro = secrets.choice(
         ("Lucas", "Ana", "Marina", "Pedro", "Clara", "Rafael")
     )
-    sobrenome = secrets.choice(
-        ("Silva", "Costa", "Lima", "Rocha", "Souza")
-    )
-    return f"{primeiro} {sobrenome} {secrets.token_hex(3).upper()}"
+    return f"{primeiro} {secrets.randbelow(10000):04d}"
 
 
 def ler_csv(caminho):
@@ -193,6 +190,17 @@ def ler_csv(caminho):
             "números ignorados e duplicados."
         )
 
+    # Keep generated names short and unique, without modifying names from CSV.
+    reservados = {c["name"] for c in contatos if not c["nome_gerado"]}
+    for indice, contato in enumerate(contatos, 1):
+        if contato["nome_gerado"]:
+            candidato = contato["name"]
+            contador = indice
+            while candidato in reservados:
+                candidato = f"{contato['name'].split()[0]} {contador:04d}"
+                contador += 1
+            contato["name"] = candidato
+            reservados.add(candidato)
     nomes = [contato["name"] for contato in contatos]
 
     if len(nomes) != len(set(nomes)):
@@ -786,6 +794,35 @@ class App:
                 raise
             return False
 
+    def digitar_nome(self, nome):
+        self.definir_etapa("Digitando Nome caractere por caractere e conferindo após sair do campo...")
+        campo = self.esperar(self.campo_nome)
+        limite = campo.get_attribute('maxlength')
+        if limite and int(limite) > 0 and len(nome) > int(limite):
+            raise RuntimeError(f"Nome tem {len(nome)} caracteres, mas o campo aceita {limite}. Reduza o nome no CSV.")
+        self.conferir_parada()
+        campo.click()
+        modificador = Keys.COMMAND if self.driver.capabilities.get('platformName', '').lower() == 'mac' else Keys.CONTROL
+        campo.send_keys(modificador, 'a')
+        campo.send_keys(Keys.BACKSPACE)
+        for caractere in nome:
+            self.conferir_parada()
+            campo.send_keys(caractere)
+            if self.parar.wait(0.06):
+                raise InterruptedError()
+        campo.send_keys(Keys.TAB)
+        if self.parar.wait(0.25):
+            raise InterruptedError()
+        def mantido(driver):
+            atual = self.campo_nome(driver)
+            if not atual:
+                return False
+            atributo = 'value' if atual.tag_name.lower() == 'input' else 'textContent'
+            return atual if (atual.get_attribute(atributo) or '').strip() == nome else False
+        campo = self.esperar(mantido, 5)
+        self.log(f"Nome digitado e mantido após sair do campo: {nome} ({len(nome)} caracteres).")
+        return campo
+
     def cadastrar(self, contato, _reabertura=False):
         nome, numero = contato["name"], contato["phone"]
         self.definir_etapa("3/5: abrindo o formulário e preenchendo Nome...")
@@ -805,16 +842,7 @@ class App:
         if not painel:
             raise RuntimeError("Não identifiquei o painel Novo contato. Cadastro bloqueado; veja o diagnóstico.")
         self.conferir_telefone_formulario(painel, numero)
-        self.conferir_parada()
-        campo.click()
-        modificador = Keys.COMMAND if self.driver.capabilities.get('platformName', '').lower() == 'mac' else Keys.CONTROL
-        campo.send_keys(modificador, "a")
-        campo.send_keys(Keys.BACKSPACE)
-        campo.send_keys(nome)
-        atributo = "value" if campo.tag_name.lower() == "input" else "textContent"
-        if (campo.get_attribute(atributo) or "").strip() != nome:
-            raise RuntimeError("O campo Nome não recebeu o texto esperado.")
-        campo.send_keys(Keys.TAB)
+        campo = self.digitar_nome(nome)
         try:
             self.confirmar_cadastro(campo)
         except RuntimeError as erro:

@@ -86,3 +86,14 @@ class CoreTests(unittest.TestCase):
                 else:
                     app.aguardar_proximo.assert_called_once_with(500.0, resultado='enviado')
                     app.enviar.assert_called_once_with(app.contatos[1], 'Olá, Nome 1')
+
+    def test_generated_names_short_and_unique_even_if_random_collides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'contacts.csv'
+            path.write_text('phone,name\n' + '\n'.join(f'119{n:08d},' for n in range(129)))
+            with patch('app.gerar_nome', return_value='Ana 0001'):
+                contacts, ignored = ler_csv(path)
+            names = [c['name'] for c in contacts]
+            self.assertEqual(len(names), 129)
+            self.assertEqual(len(set(names)), 129)
+            self.assertTrue(all(len(name) <= 12 for name in names))

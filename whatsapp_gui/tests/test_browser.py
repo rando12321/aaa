@@ -298,3 +298,19 @@ class BrowserTests(unittest.TestCase):
             save.assert_called_once()
             navigate.assert_not_called()
         self.assertIsNone(self.page.evaluate('window.sent'))
+
+    def test_name_typed_with_input_events_and_blur_enables_save(self):
+        self.open()
+        self.page.set_content('''<form><label>Nome<input aria-label="Nome" oninput="window.inputs=(window.inputs||0)+1" onblur="document.querySelector('button').disabled=!this.value.trim()"></label><button disabled>Salvar</button></form>''')
+        self.app.digitar_nome('Ana 1234')
+        self.assertEqual(self.page.locator('input').input_value(), 'Ana 1234')
+        self.assertGreaterEqual(self.page.evaluate('window.inputs'), 8)
+        self.assertTrue(self.page.get_by_role('button', name='Salvar').is_enabled())
+
+    def test_name_disappearing_on_blur_blocks_save(self):
+        self.open()
+        self.page.set_content('''<form><label>Nome<input aria-label="Nome" onblur="this.value=''"></label><button>Salvar</button></form>''')
+        original = self.app.esperar
+        self.app.esperar = lambda fn, segundos=30: original(fn, min(segundos, 1))
+        with self.assertRaisesRegex(RuntimeError, 'Digitando Nome'):
+            self.app.digitar_nome('Ana 1234')
