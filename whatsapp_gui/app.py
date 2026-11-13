@@ -30,6 +30,8 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 
+VERSAO = "2026.11.13-v3-sem-espera-contato-salvo"
+
 IGNORADOS = {"11999999999", "5511999999999"}
 
 ADICIONAR = [
@@ -214,7 +216,7 @@ class App:
         self.cadastro_confirmado = None
         self.envio_pendente = None
 
-        root.title("WhatsApp — cadastrar e enviar")
+        root.title(f"WhatsApp — cadastrar e enviar — {VERSAO}")
         root.geometry("960x730")
 
         barra = ttk.Frame(root)
@@ -292,6 +294,8 @@ class App:
             fill="both", expand=True, padx=12, pady=10
         )
 
+        self.log(f"VERSÃO: {VERSAO}")
+        self.log(f"ARQUIVO EM EXECUÇÃO: {Path(__file__).resolve()}")
         root.after(100, self.atualizar)
         root.protocol("WM_DELETE_WINDOW", self.fechar)
 
@@ -1052,7 +1056,10 @@ class App:
             """)
         return dict(linhas)
 
-    def aguardar_proximo(self, base):
+    def aguardar_proximo(self, base, resultado=None):
+        if resultado != "enviado":
+            self.log("SEM ESPERA: não houve envio confirmado neste contato.")
+            return
         extra = random.randint(60, 180)
         total = base + extra
         minutos, segundos = divmod(int(total), 60)
@@ -1108,6 +1115,7 @@ class App:
         ):
             return
 
+        self.log(f"LOTE — VERSÃO: {VERSAO}. Espera somente após envio confirmado.")
         contatos = list(self.contatos)
 
         def lote():
@@ -1157,7 +1165,7 @@ class App:
                 enviados += 1
 
                 if indice < total:
-                    self.aguardar_proximo(base)
+                    self.aguardar_proximo(base, resultado="enviado")
 
             self.log(
                 f"\nCONCLUÍDO: {enviados} envios processados; "

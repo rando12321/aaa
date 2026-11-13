@@ -2,7 +2,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from app import App, numero_brasileiro, ler_csv, literal
 
 
@@ -41,13 +41,48 @@ class CoreTests(unittest.TestCase):
         app.log = lambda text: None
         app.parar = threading.Event()
         with patch('app.random.randint', return_value=60) as rng, patch.object(app.parar, 'wait', return_value=False) as wait:
-            app.aguardar_proximo(30)
+            app.aguardar_proximo(30, resultado="enviado")
             rng.assert_called_once_with(60, 180)
             wait.assert_called_once_with(90)
         app.parar.set()
         with self.assertRaises(InterruptedError):
-            app.aguardar_proximo(30)
+            app.aguardar_proximo(30, resultado="enviado")
 
     def test_xpath_escaping(self):
         self.assertEqual(literal('nome'), "'nome'")
         self.assertTrue(literal('A\'na "Teste"').startswith('concat('))
+
+    def test_no_wait_without_confirmed_send(self):
+        app = App.__new__(App)
+        app.log = lambda text: None
+        app.parar = Mock()
+        for resultado in (None, "existente", "recusado", "incerto"):
+            app.aguardar_proximo(500, resultado=resultado)
+        app.parar.wait.assert_not_called()
+
+    def test_batch_waits_only_after_new_send(self):
+        for existing_only in (True, False):
+            with self.subTest(existing_only=existing_only):
+                app = App.__new__(App)
+                app.contatos = [{'phone': str(i), 'name': f'Nome {i}'} for i in range(3)]
+                app.driver = object()
+                app.mensagem = Mock()
+                app.mensagem.get.return_value = 'Olá, {name}'
+                app.intervalo = Mock()
+                app.intervalo.get.return_value = '500'
+                app.executar = lambda tarefa: tarefa()
+                app.log = Mock()
+                app.conferir_parada = Mock()
+                app.abrir_e_detectar = Mock(side_effect=[False, not existing_only, False])
+                app.cadastrar = Mock()
+                app.enviar = Mock()
+                app.aguardar_proximo = Mock()
+                with patch('app.messagebox.askyesno', return_value=True):
+                    app.iniciar()
+                self.assertEqual(app.abrir_e_detectar.call_count, 3)
+                if existing_only:
+                    app.aguardar_proximo.assert_not_called()
+                    app.enviar.assert_not_called()
+                else:
+                    app.aguardar_proximo.assert_called_once_with(500.0, resultado='enviado')
+                    app.enviar.assert_called_once_with(app.contatos[1], 'Olá, Nome 1')
