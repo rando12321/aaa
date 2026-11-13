@@ -30,7 +30,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-VERSAO = "2026.11.13-v13-confirmar-descartar"
+VERSAO = "2026.11.13-v14-nome-teclado-e-foco"
 
 IGNORADOS = {"11999999999", "5511999999999"}
 
@@ -921,17 +921,21 @@ class App:
         if limite and int(limite) > 0 and len(nome) > int(limite):
             raise RuntimeError(f"Nome tem {len(nome)} caracteres, mas o campo aceita {limite}. Reduza o nome no CSV.")
         self.conferir_parada()
+        if campo.get_attribute('readonly'):
+            raise RuntimeError("O campo Nome está somente para leitura; não é possível digitar.")
         campo.click()
+        focado = self.driver.execute_script("return document.activeElement === arguments[0] || arguments[0].contains(document.activeElement);", campo)
+        if not focado:
+            raise RuntimeError("O clique não deu foco ao campo Nome. Digitação interrompida.")
+        self.log("Foco confirmado no campo Nome. Digitando com teclas pressionadas e soltas.")
         modificador = Keys.COMMAND if self.driver.capabilities.get('platformName', '').lower() == 'mac' else Keys.CONTROL
-        campo.send_keys(modificador, 'a')
-        campo.send_keys(Keys.BACKSPACE)
+        ActionChains(self.driver).key_down(modificador).send_keys('a').key_up(modificador).send_keys(Keys.BACKSPACE).perform()
         for caractere in nome:
             self.conferir_parada()
-            campo.send_keys(caractere)
-            if self.parar.wait(0.06):
-                raise InterruptedError()
-        campo.send_keys(Keys.TAB)
-        if self.parar.wait(0.25):
+            ActionChains(self.driver).send_keys(caractere).pause(0.12).perform()
+        self.conferir_parada()
+        ActionChains(self.driver).send_keys(Keys.TAB).perform()
+        if self.parar.wait(0.4):
             raise InterruptedError()
         def mantido(driver):
             atual = self.campo_nome(driver)

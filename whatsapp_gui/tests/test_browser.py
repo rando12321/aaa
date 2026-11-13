@@ -449,3 +449,13 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(self.page.evaluate('window.discarded'), 1)
         self.assertEqual(self.page.evaluate('localStorage.opens'), '2')
         self.assertEqual(self.app.cadastro_confirmado, self.contact['phone'])
+
+    def test_name_keyboard_events_focus_correct_field(self):
+        self.open()
+        self.page.set_content('''<form><label>Nome<input aria-label="Nome" onkeydown="(window.keys||=[]).push({key:event.key,trusted:event.isTrusted})" onkeyup="window.ups=(window.ups||0)+1"></label>
+        <label>Sobrenome<input aria-label="Sobrenome" value="Preservado"></label></form>''')
+        self.app.digitar_nome('Ana 1234')
+        self.assertEqual(self.page.locator('input[aria-label=Nome]').input_value(), 'Ana 1234')
+        self.assertEqual(self.page.locator('input[aria-label=Sobrenome]').input_value(), 'Preservado')
+        self.assertTrue(all(e['trusted'] for e in self.page.evaluate('window.keys')))
+        self.assertGreaterEqual(self.page.evaluate('window.ups'), len('Ana 1234'))

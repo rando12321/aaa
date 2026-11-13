@@ -91,8 +91,14 @@ class DomDriver:
 
     def execute(self, command, params):
         assert command == 'actions'
+        special = {Keys.CONTROL: 'Control', Keys.COMMAND: 'Meta', Keys.SHIFT: 'Shift',
+                   Keys.BACKSPACE: 'Backspace', Keys.TAB: 'Tab', Keys.ESCAPE: 'Escape', Keys.ENTER: 'Enter'}
         for device in params['actions']:
+            if device['type'] != 'key':
+                continue
             for action in device['actions']:
-                if action['type'] == 'keyDown' and action['value'] == Keys.ESCAPE:
-                    self.page.keyboard.press('Escape')
+                if action['type'] == 'keyDown':
+                    self.page.keyboard.down(special.get(action['value'], action['value']))
+                elif action['type'] == 'keyUp':
+                    self.page.keyboard.up(special.get(action['value'], action['value']))
         return {'value': None}
