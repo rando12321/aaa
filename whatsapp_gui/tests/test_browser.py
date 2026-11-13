@@ -15,10 +15,12 @@ HTML = '''<!doctype html><meta charset="utf-8"><style>[hidden]{display:none!impo
 <div id="messages"></div><footer><div role="textbox" contenteditable="true"></div>
 <button aria-label="Enviar" onclick="send()"><span data-icon="send"></span></button></footer></div>
 <div id="menu" role="menu" hidden><button id="action" onclick="menu.hidden=true;document.getElementById('form').hidden=false">Adicionar aos contatos</button></div>
+<section><button type="button" aria-label="Fechar" onclick="document.getElementById('form').hidden=true;document.getElementById('form').innerHTML=window.originalForm;window.closes=(window.closes||0)+1"><span data-icon="x"></span></button>
 <form id="form" role="dialog" hidden onsubmit="return false"><h2>Novo contato</h2>
 <label>Nome <input aria-label="Nome"></label><label>Telefone <input type="tel" value="+55 93 98410-8321"></label>
-<button type="button" aria-label="Salvar" onclick="localStorage.saved='yes';form.hidden=true;document.getElementById('action').textContent='Editar contato'">Salvar</button></form>
+<button type="button" aria-label="Salvar" onclick="localStorage.saved='yes';form.hidden=true;document.getElementById('action').textContent='Editar contato'">Salvar</button></form></section>
 <script>
+window.originalForm=document.getElementById('form').innerHTML;
 if(localStorage.saved) action.textContent='Editar contato';
 document.addEventListener('keydown',e=>{if(e.key==='Escape') menu.hidden=true});
 function send(){const f=document.querySelector('footer [contenteditable]');
@@ -371,3 +373,27 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(self.page.evaluate('localStorage.opens'), '2')
         self.assertIsNone(self.page.evaluate('localStorage.saved'))
         self.assertIsNone(self.page.evaluate('window.sent'))
+
+    def test_recovery_clicks_x_without_navigation(self):
+        html = HTML.replace("menu.hidden=true;document.getElementById('form').hidden=false",
+            "menu.hidden=true;document.getElementById('form').hidden=false;localStorage.opens=Number(localStorage.opens||0)+1;if(Number(localStorage.opens)===1)document.querySelector('#form button').remove()")
+        self.serve(html)
+        self.app.abrir_e_detectar(self.contact['phone'])
+        original = self.app.esperar
+        self.app.esperar = lambda fn, segundos=30: original(fn, min(segundos, 1))
+        with patch.object(self.app.driver, 'get', side_effect=AssertionError('não deve recarregar durante recuperação')), patch.object(self.app, 'confirmar_aviso_cadastro', return_value=True):
+            self.app.cadastrar(self.contact)
+        self.assertEqual(self.page.evaluate('window.closes'), 1)
+        self.assertEqual(self.page.evaluate('localStorage.opens'), '2')
+        self.assertEqual(self.app.cadastro_confirmado, self.contact['phone'])
+
+    def test_no_identifiable_x_does_not_reload(self):
+        self.app.abrir_e_detectar(self.contact['phone'])
+        self.page.locator('button[aria-label=Fechar]').evaluate('e=>e.remove()')
+        campo = self.app.campo_nome(self.app.driver)
+        original = self.app.esperar
+        self.app.esperar = lambda fn, segundos=30: original(fn, min(segundos, 1))
+        with patch.object(self.app.driver, 'get') as navigate:
+            with self.assertRaisesRegex(RuntimeError, 'Tempo esgotado'):
+                self.app.fechar_cadastro_pelo_x(campo)
+            navigate.assert_not_called()

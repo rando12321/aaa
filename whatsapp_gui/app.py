@@ -30,7 +30,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-VERSAO = "2026.11.13-v11-reabrir-erro-validacao"
+VERSAO = "2026.11.13-v12-fechar-pelo-x"
 
 IGNORADOS = {"11999999999", "5511999999999"}
 
@@ -787,6 +787,44 @@ class App:
         self.conferir_parada()
         botao.click()
 
+    def fechar_cadastro_pelo_x(self, campo):
+        painel = self.painel_formulario(campo)
+        if not painel:
+            raise RuntimeError("Não identifiquei o painel Novo contato para fechar pelo X.")
+        def localizar(driver):
+            return driver.execute_script(r"""
+                const visible = e => e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden';
+                const norm = t => (t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+                let root = arguments[0];
+                while (root && root !== document.body && !['app', 'side'].includes(root.id)) {
+                    const found = new Set();
+                    for (const e of root.querySelectorAll('button, [role=button], [data-icon], [aria-label], [title]')) {
+                        if (!visible(e)) continue;
+                        const labels = [e.getAttribute('aria-label'), e.getAttribute('title'), e.innerText].map(norm);
+                        const icon = e.getAttribute('data-icon') || '';
+                        if (!labels.some(t => /^(fechar|close|fechar painel|close panel|fechar novo contato|close new contact)$/.test(t))
+                            && !/^(x|x-alt|close|cross|dismiss)$/.test(icon)) continue;
+                        const b = e.closest('button, [role=button], [tabindex="0"]');
+                        if (b && root.contains(b) && visible(b) && !b.disabled && b.getAttribute('aria-disabled') !== 'true'
+                            && !b.closest('#side, footer, #main .message-in, #main .message-out')) found.add(b);
+                    }
+                    if (found.size === 1) return [...found][0];
+                    if (found.size > 1) return null;
+                    root = root.parentElement;
+                }
+                return null;
+            """, painel) or False
+        fechar = self.esperar(localizar, 5)
+        self.conferir_parada()
+        fechar.click()
+        def fechado(driver):
+            try:
+                return not campo.is_displayed()
+            except StaleElementReferenceException:
+                return True
+        self.esperar(fechado, 5)
+        self.log("Novo contato fechado pelo X. Página preservada, sem F5.")
+
     def verificar_formulario_sem_salvar(self, contato):
         self.definir_etapa("Conferindo nome, telefone, país e validação antes de procurar Salvar...")
         campo = self.esperar(self.campo_nome)
@@ -919,11 +957,21 @@ class App:
                 self.log("Validação impediu Salvar. Fechando e reabrindo Adicionar contato UMA VEZ, sem clicar em Salvar.")
             else:
                 self.log("Salvar não apareceu em 5 segundos. Fechando e reabrindo Adicionar contato UMA VEZ.")
-            self.definir_etapa("Reabrindo Adicionar contato após falha antes de Salvar...")
+            self.definir_etapa("Fechando Novo contato pelo X, sem recarregar a página...")
+            self.fechar_cadastro_pelo_x(campo)
+            self.definir_etapa("Reabrindo Adicionar contato pela interface...")
             self.conferir_parada()
-            self.driver.get("https://web.whatsapp.com/send?" + urlencode({"phone": numero}))
-            self.esperar(self.conversa_ou_recusa, 90)
-            estado, adicionar = self.detectar_estado_contato()
+            if self.cabecalho() and self.campo_mensagem(self.driver):
+                estado, adicionar = self.detectar_estado_contato()
+            else:
+                estado = "novo"
+                adicionar = self.acao_visivel(ADICIONAR + CRIAR)
+                if not adicionar:
+                    nova = self.acao_visivel(['Nova conversa', 'New chat'])
+                    if not nova:
+                        raise RuntimeError("Formulário fechado pelo X, mas não identifiquei Adicionar contato na tela. Página não foi recarregada.")
+                    nova.click()
+                    adicionar = self.esperar(lambda d: self.acao_visivel(ADICIONAR + CRIAR), 10)
             if estado == "existente":
                 self.cadastro_confirmado = numero
                 self.fechar_sobreposicoes()
