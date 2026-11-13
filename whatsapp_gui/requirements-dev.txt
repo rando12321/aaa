@@ -1,1 +1,1 @@
--r requirements.txt
+# Testes com unittest, sem dependências externas.

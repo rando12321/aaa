@@ -1,61 +1,51 @@
-# WhatsApp visual — OpenCV + teclado/mouse do Windows
+# WhatsApp — um script Python, sem instalar pacotes nem calibrar
 
-A V16 removeu Selenium e WebDriver do aplicativo. **Todo o programa continua em `app.py`**. O Chrome é o navegador normal do usuário; o aplicativo reconhece imagens na tela, lê regiões por OCR local e usa `SendInput` para clicar e digitar.
+A **V17** usa somente a biblioteca padrão do Python e APIs presentes no Windows. O aplicativo inteiro está em **`app.py`**. Não requer `pip`, OpenCV, NumPy, Pillow, Selenium, OCR, extensão, serviço de IA ou arquivos de calibração.
 
-## Instalar e abrir
+## Abrir
 
-Use **Windows 10/11 com Python 3.12 de 64 bits**, desktop desbloqueado e Chrome visível. No terminal:
+Requer **Windows 10/11**, Python 3.12+ com Tkinter (instalador padrão do Python para Windows) e Chrome normal.
 
-```powershell
-py -3.12 -m pip install numpy==2.2.6 opencv-python==4.11.0.86 Pillow==11.3.0 rapidocr_onnxruntime==1.4.4 onnxruntime==1.20.1
-py -3.12 app.py
-```
+1. Baixe `app.py` e execute `python app.py` ou `py app.py`.
+2. Abra manualmente `https://web.whatsapp.com/` no Chrome normal e faça login pelo QR.
+3. Deixe a aba WhatsApp ativa em uma única janela. Clique **Chrome / QR** no aplicativo para conectar essa janela.
+4. Carregue o CSV, informe a mensagem e o intervalo e clique **Iniciar**.
 
-Ou, com o repositório completo, instale `python -m pip install -r requirements.txt`. OpenCV não substitui os pacotes de OCR. Os modelos OCR vêm no pacote RapidOCR e são executados localmente; não é necessário Tesseract nem serviço de IA externo.
+Não há etapa de instalação de bibliotecas nem de seleção de imagens. Nenhum perfil novo de navegador é criado; o login é o do Chrome normal. Mantenha a janela do Chrome visível e não use mouse/teclado durante o lote. Se outra janela ganhar foco, as próximas teclas e cliques são bloqueados.
 
-Abra manualmente `https://web.whatsapp.com/` no Chrome normal, faça login por QR e deixe essa aba ativa em uma única janela. Clique **Chrome / QR** no aplicativo para conectar a janela. O aplicativo não inicia outro perfil, não instala extensão e não encerra o Chrome ao fechar.
+## Como funciona
 
-## Calibração obrigatória antes do primeiro lote
+O script chama **UI Automation do Windows por `ctypes`**, obtendo nomes, estados, valores e retângulos dos controles que o Chrome expõe. Os cliques e a digitação usam **Windows SendInput**, com confirmação de foco e conferência do valor digitado. Não injeta JavaScript na página, não usa WebDriver e não se conecta a API de IA externa.
 
-A versão não contém imagens presumidas de botões. **Sem calibrar, ela bloqueia o lote antes de navegar, salvar ou enviar.** As capturas anteriores desta conversa não fornecem todos os controles necessários com a escala e resolução do computador atual.
+As assinaturas COM seguem `uiautomationclient.h`: IUIAutomation, IUIAutomationElement, ValuePattern, TextPattern e LegacyIAccessiblePattern. O COM é inicializado e encerrado no thread que o utiliza; não são instalados `comtypes`, `pywin32` ou wrappers de automação.
 
-1. Mantenha fixos o tamanho da janela do Chrome, zoom, tema e escala do Windows.
-2. Clique **Calibrar OpenCV**. Abra manualmente no Chrome a tela/menu que contém o controle escolhido.
-3. Selecione um item na lista e clique **Capturar controle/área**. O aplicativo ativa a janela do WhatsApp e apresenta uma captura estática para seleção.
-4. Para um controle, arraste um retângulo ao redor de uma imagem estável (rótulo/ícone). Depois clique, na captura, no ponto exato onde a ação deve ocorrer. O campo pode ficar ao lado do rótulo: o ponto do clique é registrado separadamente.
-5. Para uma região OCR, arraste apenas a região solicitada. A área `telefone_lido` inclui país e valor; `nome_lido` e `rascunho_lido` incluem só os valores, sem rótulos. `saida_lida` deve incluir as últimas mensagens enviadas e não mensagens recebidas.
-6. Repita os itens obrigatórios. `criar`, `salvo`, `dados` e `menu_dados` são opcionais, conforme sua interface. A lista de itens ainda ausentes aparece ao tentar iniciar.
+**Limitação necessária:** o Chrome precisa expor o documento e os controles à acessibilidade do Windows. Nem todas as versões/interfaces fazem isso da mesma forma. Se um controle não tiver identificação acessível ou o valor do campo não puder ser lido, o script interrompe com diagnóstico. Não promete funcionamento universal nem automação indetectável. A mudança de tecnologia não comprova que os erros anteriores fossem causados por detecção do Selenium.
 
-Distinga **`telefone_ok` (✓ verde junto ao telefone)** de **`salvar` (círculo ✓ inferior)**. Capture os controles habilitados. No campo Nome, use ícone ou rótulo que continue visível após preencher; não capture apenas o placeholder que desaparece. A imagem `conversa` deve ser um ícone estável no rodapé, que desapareça durante o carregamento de outro destinatário. Não use a área inteira com mensagens variáveis como modelo.
+## Recursos mantidos
 
-A busca usa uma região ao redor da posição calibrada, correspondência de imagem e cor. Se encontrar dois candidatos ou se a janela mudar de tamanho, interrompe. Não clica por coordenadas presumidas. As coordenadas de ação são sempre derivadas da imagem encontrada e da calibração.
+- GUI Tkinter, CSV `phone,name`, vírgula/ponto e vírgula, UTF-8, telefones como texto, deduplicação, exclusão de `11999999999` e sua versão internacional, normalização brasileira +55.
+- Nomes automáticos curtos e únicos, personalização `{name}`, mensagem com várias linhas, Parar e logs por etapa.
+- Abre o número diretamente por URL digitada com teclado nativo. Uma recusa exige texto real da interface; timeout é inconclusivo.
+- Contato salvo precisa de Adicionar/Editar no menu/dados do contato, sem depender do nome do perfil. Existente é pulado sem mensagem e sem espera.
+- Nome é digitado com teclas nativas e conferido. Telefone/país precisam corresponder ao CSV; não considera números com/sem nono dígito iguais por suposição. Um número visível em outra parte do histórico não comprova o telefone do formulário.
+- Salvar é procurado por até 5 segundos. Sem o controle, ou com validação inválida antes de salvar, fecha pelo X, confirma Descartar e reabre pela interface uma única vez, sem F5 nessa recuperação. Não repete um clique em Salvar com resultado incerto.
+- Cadastro exige nova notificação de sucesso ou confirmação de Editar contato antes de liberar o envio ao mesmo número. A verificação posterior não aplica SKIP ao contato cadastrado naquele lote.
+- Rascunho existente é preservado e bloqueia o envio. A mensagem é conferida antes do clique em Enviar. A confirmação exige nova ocorrência do texto num elemento identificado como mensagem de saída; se o Chrome não expuser esse marcador, o resultado será **envio incerto**, sem nova tentativa automática. Campo vazio sozinho não confirma envio e não se afirma entrega.
+- Espera base + inteiro aleatório de 60 a 180 segundos somente após envio, nunca após existente/recusado nem após o último contato.
+- Chrome normal permanece aberto ao fechar o aplicativo. Não foi adicionada retomada automática entre execuções nem sincronização da agenda do celular.
 
-## Fluxo mantido
+## Diagnósticos
 
-- CSV UTF-8, `phone,name`, vírgula/ponto e vírgula, deduplicação, exclusões e +55. Nomes gerados curtos e únicos; `{name}` e várias linhas de mensagem.
-- Abre diretamente o número por URL digitada na barra de endereço com teclas nativas. Espera a conversa anterior sair antes de aceitar nova conversa/aviso de recusa.
-- Contato existente exige imagem de Editar no menu, não o nome de perfil. É pulado sem mensagem e sem espera.
-- Após adicionar, digita o nome e compara a leitura OCR com o valor desejado. O telefone lido precisa corresponder exatamente ao CSV; não adiciona/remove nono dígito por suposição. Exige a imagem de telefone validado antes de salvar.
-- Se Salvar/validação não aparecer em 5 segundos, fecha pelo X, confirma Descartar e reabre pela interface uma única vez, sem navegar ou dar F5 nessa recuperação. Depois preenche novamente o mesmo nome. Clique em Salvar com resultado incerto não é repetido.
-- Cadastro precisa de nova tela de sucesso ou de confirmação posterior de Editar contato antes do envio. Um formulário fechado sozinho não basta.
-- Reabre o número exato antes de enviar, bloqueia rascunhos e confere o texto por OCR. Clica Enviar uma vez; exige aumento das ocorrências do texto na região de mensagens de saída. Esvaziar o campo não comprova envio. OCR inconclusivo gera envio incerto, sem repetição automática.
-- Espera base + inteiro de 60 a 180 segundos apenas após envio, nunca após existente/recusado nem após último contato. Parar interrompe a espera e as próximas ações.
-- Logs por etapa e capturas em `diagnosticos/`. Calibração em `.local/opencv/`. Ambas são locais e ignoradas pelo Git. Proteja-as: podem conter dados pessoais. Não foi adicionada retomada automática entre execuções.
+Falhas geram JSON dos controles acessíveis e captura **BMP**, ambos em `diagnosticos/`, ignorada pelo Git. A captura usa GDI nativo e o gravador BMP é implementado com `ctypes` e `struct`. Esses arquivos podem conter dados pessoais; não publique sessão ou diagnósticos.
 
-Mantenha o Chrome em primeiro plano e não use mouse/teclado durante o lote. Se outra janela ganhar foco, as próximas entradas são bloqueadas. Não há garantia de automação indetectável. O programa pode parar quando OCR, cor, escala ou interface diferirem da calibração; não diminua os limites para forçar um clique sem conferir a imagem.
+## Validação
 
-## O que foi e não foi validado
-
-Nesta sessão Linux foram executados os testes de CSV/espera, estruturas e sequências de entrada nativa com API simulada, reconhecimento OpenCV com imagens e fluxo visual simulado, incluindo cadastro→envio, existente, rascunho, envio incerto e X→Descartar→reabrir. O OCR local real foi exercitado com uma imagem de telefone renderizada.
-
-**A captura/cliques/teclas no Windows real, a janela Tkinter de calibração e o fluxo autenticado da conta WhatsApp não foram validados nesta sessão.** A migração está implementada; o uso requer calibração e teste manual inicial no seu Windows. Não é uma versão validada de ponta a ponta na sua conta.
-
-Para desenvolvimento:
+Os testes são executáveis com Python sem instalar pacotes:
 
 ```sh
-python -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v
 ```
 
-No Windows, use `.venv\Scripts\python.exe` no lugar de `.venv/bin/python`.
+Foram verificados imports exclusivamente da biblioteca padrão em ambiente Python limpo, CSV e esperas, layout binário das estruturas Windows, sequências de teclas/mouse com API simulada, gravação BMP e fluxo com provedor de acessibilidade simulado: cadastrar→enviar, existente, rascunho, envio incerto, recusa, ambiguidade, controle coberto, telefone divergente e X→Descartar→reabrir.
+
+**Não houve teste real de COM/UI Automation, SendInput, captura GDI, GUI ou conta autenticada no Windows nesta sessão Linux.** O script foi implementado e testado em simulação; o fluxo real ainda precisa ser validado no computador de uso. Não considere o processo de ponta a ponta confirmado por esses testes.

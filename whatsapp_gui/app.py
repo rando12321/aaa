@@ -1,6 +1,7 @@
-"""WhatsApp visual: OpenCV + OCR local + Windows SendInput. Sem WebDriver.
-Instale: python -m pip install -r requirements.txt
-Abra o Chrome normal, conecte a janela e calibre os controles antes de iniciar.
+"""WhatsApp — script único com biblioteca padrão do Python.
+Windows 10/11, Python 3.12+, Chrome normal com UI Automation disponível.
+Não requer pip, OpenCV, Selenium, OCR externo ou calibração. Execute python app.py.
+A integração real no Windows/WhatsApp precisa de validação; não há garantia de indetectabilidade.
 """
 import csv
 import ctypes
@@ -14,16 +15,14 @@ import threading
 import time
 import tkinter as tk
 import unicodedata
+import weakref
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import urlencode
 
-import cv2
-import numpy as np
-from PIL import Image, ImageGrab
-
-VERSAO = '2026.11.13-v16-opencv-windows-sem-webdriver'
+VERSAO = '2026.11.13-v17-python-puro-acessibilidade-windows'
 IGNORADOS = {'11999999999', '5511999999999'}
 
 class NumeroRecusado(Exception):
@@ -273,74 +272,13 @@ class TecladoWindows:
         self.enviar([(0x09, 0, 0), (0x09, 0, 2)], conferir_foco)
 
 
-VISUAL_DIR = Path(__file__).resolve().parent / '.local' / 'opencv'
-CONTROLES = {
-    'menu': 'Três pontos da conversa', 'adicionar': 'Adicionar aos contatos',
-    'editar': 'Editar contato', 'criar': 'Criar contato (se existir)',
-    'nome': 'Campo Nome (capturar rótulo estável; clicar onde digitar)',
-    'telefone': 'Campo telefone (capturar rótulo; clicar onde digitar)',
-    'telefone_ok': '✓ verde de telefone válido (não é Salvar)',
-    'salvar': 'Salvar / círculo ✓ inferior', 'fechar': 'X ao lado de Novo contato',
-    'aviso_descartar': 'Pergunta Deseja descartar as mudanças?', 'descartar': 'Botão Descartar',
-    'conversa': 'Conversa aberta (ícone estável no rodapé)',
-    'mensagem': 'Campo de mensagem (rótulo/ícone estável)', 'enviar': 'Botão Enviar',
-    'recusado': 'Aviso de número inválido/não está no WhatsApp', 'ok': 'OK do aviso de número',
-    'salvo': 'Notificação Contato salvo (opcional)', 'dados': 'Dados do contato (opcional)',
-    'menu_dados': 'Menu nos dados do contato (opcional)',
-}
-AREAS = {
-    'telefone_lido': 'Região contendo país +55 e valor do telefone no formulário',
-    'nome_lido': 'Região só do valor digitado no Nome (sem o rótulo)',
-    'rascunho_lido': 'Região do texto do rascunho (sem rótulos/ícones)',
-    'saida_lida': 'Região das últimas mensagens de saída',
-}
-OBRIGATORIOS = {'menu', 'adicionar', 'editar', 'nome', 'telefone', 'salvar', 'fechar',
-                'aviso_descartar', 'descartar', 'telefone_ok', 'conversa', 'mensagem', 'enviar', 'recusado', 'ok'}
-
-
-def texto_comparavel(texto):
-    return ' '.join(unicodedata.normalize('NFC', texto).split())
-
-
-def localizar_imagem(frame, modelo, limite=0.90, busca=None):
-    """Unique match within a calibrated region; ambiguity is never clicked."""
-    cinza, alvo = frame, modelo
-    if frame.ndim != modelo.ndim:
-        cinza = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
-        alvo = cv2.cvtColor(modelo, cv2.COLOR_BGR2GRAY) if modelo.ndim == 3 else modelo
-    detalhe = float(alvo.std(axis=(0, 1)).mean()) if alvo.ndim == 3 else float(alvo.std())
-    if alvo.size == 0 or detalhe < 3:
-        raise ValueError('Modelo sem detalhe suficiente. Capture rótulo, borda ou ícone completo.')
-    h, w = cinza.shape[:2]
-    if busca:
-        x1, y1, x2, y2 = [int(v) for v in busca]
-        x1, y1, x2, y2 = max(0, x1), max(0, y1), min(w, x2), min(h, y2)
-    else:
-        x1, y1, x2, y2 = 0, 0, w, h
-    regiao = cinza[y1:y2, x1:x2]
-    th, tw = alvo.shape[:2]
-    if th > regiao.shape[0] or tw > regiao.shape[1]:
-        return None
-    scores = cv2.matchTemplate(regiao, alvo, cv2.TM_CCOEFF_NORMED)
-    _, melhor, _, (x, y) = cv2.minMaxLoc(scores)
-    if not np.isfinite(melhor) or melhor < limite:
-        return None
-    diferenca = float(cv2.absdiff(regiao[y:y+th, x:x+tw], alvo).mean())
-    if diferenca > 22:
-        return None
-    outros = scores.copy()
-    outros[max(0, y-th//2):y+th//2+1, max(0, x-tw//2):x+tw//2+1] = -1
-    if outros.size and float(outros.max()) >= limite:
-        raise RuntimeError('Mais de uma correspondência visual. Reduza a região de busca na calibração.')
-    return {'x': x+x1, 'y': y+y1, 'score': float(melhor), 'w': tw, 'h': th}
-
-
 class DesktopWindows(TecladoWindows):
     def __init__(self):
         super().__init__()
         self.api.GetWindowRect.argtypes = [self.ctypes.c_void_p, self.ctypes.c_void_p]
         self.api.GetSystemMetrics.argtypes = [self.ctypes.c_int]
         self.rect_anterior = None
+
 
     def rect(self):
         c = self.ctypes
@@ -351,15 +289,11 @@ class DesktopWindows(TecladoWindows):
             raise RuntimeError('Não foi possível ler a janela do Chrome.')
         return r.left, r.top, r.right, r.bottom
 
+
     def proteger(self):
         if not self.em_primeiro_plano():
             raise RuntimeError('Chrome perdeu o primeiro plano. Interrompido para não clicar/digitar em outra janela.')
 
-    def capturar(self):
-        self.proteger()
-        self.rect_anterior = self.rect()
-        shot = ImageGrab.grab(bbox=self.rect_anterior, all_screens=True).convert('RGB')
-        return cv2.cvtColor(np.array(shot), cv2.COLOR_RGB2BGR)
 
     def clicar(self, x, y):
         self.proteger()
@@ -367,7 +301,7 @@ class DesktopWindows(TecladoWindows):
             raise RuntimeError('A janela foi movida após a captura. Execute novamente para obter posições atualizadas.')
         left, top, right, bottom = self.rect_anterior
         if not (0 <= x < right-left and 0 <= y < bottom-top):
-            raise RuntimeError('Ponto de clique fora da janela calibrada.')
+            raise RuntimeError('Ponto de clique fora da janela do Chrome.')
         vx, vy = self.api.GetSystemMetrics(76), self.api.GetSystemMetrics(77)
         vw, vh = self.api.GetSystemMetrics(78), self.api.GetSystemMetrics(79)
         if vw <= 1 or vh <= 1:
@@ -385,17 +319,23 @@ class DesktopWindows(TecladoWindows):
             self.api.SendInput(1, self.ctypes.byref(soltar), self.ctypes.sizeof(self.INPUT))
             raise RuntimeError('Windows recusou parte do clique nativo. Não repetir sem conferir a tela.')
 
+
     def atalho(self, *teclas):
         eventos = [(t, 0, 0) for t in teclas] + [(t, 0, 2) for t in reversed(teclas)]
         self.enviar(eventos, self.em_primeiro_plano)
 
-    def escrever(self, texto, parar, limpar=True, tab=False):
+
+    def escrever(self, texto, parar, limpar=True, tab=False, conferir_foco=None):
+        if conferir_foco and not conferir_foco():
+            raise RuntimeError('Campo perdeu o foco antes da digitação.')
         if limpar:
             self.atalho(0x11, 0x41)
             self.atalho(0x08)
         for caractere in texto:
             if parar.is_set():
                 raise InterruptedError()
+            if conferir_foco and not conferir_foco():
+                raise RuntimeError('Campo perdeu o foco durante a digitação.')
             if caractere == '\n':
                 self.atalho(0x10, 0x0D)
             else:
@@ -404,259 +344,603 @@ class DesktopWindows(TecladoWindows):
                 for i in range(0, len(raw), 2):
                     unidade = int.from_bytes(raw[i:i+2], 'little')
                     eventos.extend([(0, unidade, 4), (0, unidade, 6)])
-                self.enviar(eventos, self.em_primeiro_plano)
+                self.enviar(eventos, conferir_foco or self.em_primeiro_plano)
             if parar.wait(0.09):
                 raise InterruptedError()
         if tab:
             self.atalho(0x09)
 
 
-class TelaVisual:
-    def __init__(self, parar, log, desktop=None, pasta=VISUAL_DIR, ocr=None):
+# UI Automation COM bindings: signatures follow uiautomationclient.h.
+class GUID(ctypes.Structure):
+    _fields_ = [('d1', ctypes.c_uint32), ('d2', ctypes.c_uint16), ('d3', ctypes.c_uint16), ('d4', ctypes.c_ubyte * 8)]
+
+    @classmethod
+    def from_string(cls, value):
+        import uuid
+        return cls.from_buffer_copy(uuid.UUID(value).bytes_le)
+
+
+class RECT(ctypes.Structure):
+    _fields_ = [('left', ctypes.c_int32), ('top', ctypes.c_int32), ('right', ctypes.c_int32), ('bottom', ctypes.c_int32)]
+
+
+class POINT(ctypes.Structure):
+    _fields_ = [('x', ctypes.c_int32), ('y', ctypes.c_int32)]
+
+
+class VARIANT_RECORD(ctypes.Structure):
+    _fields_ = [('record', ctypes.c_void_p), ('info', ctypes.c_void_p)]
+
+
+class VARIANT_VALUE(ctypes.Union):
+    _fields_ = [('integer', ctypes.c_int32), ('boolean', ctypes.c_int16), ('real', ctypes.c_double),
+                ('pointer', ctypes.c_void_p), ('record', VARIANT_RECORD)]
+
+
+class VARIANT(ctypes.Structure):
+    _anonymous_ = ('value',)
+    _fields_ = [('vt', ctypes.c_uint16), ('r1', ctypes.c_uint16), ('r2', ctypes.c_uint16), ('r3', ctypes.c_uint16), ('value', VARIANT_VALUE)]
+
+
+class NativeUIError(RuntimeError):
+    pass
+
+
+class COMPointer:
+    def __init__(self, client, pointer):
+        self.client, self.pointer = client, pointer
+        if hasattr(client, 'pointers'):
+            client.pointers.add(self)
+
+    def close(self):
+        if self.pointer and self.pointer.value:
+            self.client.method(self.pointer, 2, ctypes.c_uint32)()
+            self.pointer = ctypes.c_void_p()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+@dataclass
+class Elemento:
+    nome: str
+    tipo: int
+    rect: tuple
+    habilitado: bool = True
+    fora_tela: bool = False
+    valor: object = None
+    automation_id: str = ''
+    ajuda: str = ''
+    aria: str = ''
+    nativo: object = None
+
+    @property
+    def visivel(self):
+        return not self.fora_tela and self.rect[2] > self.rect[0] and self.rect[3] > self.rect[1]
+
+
+class UIAWindows:
+    def __init__(self):
+        if not sistema_windows():
+            raise NativeUIError('Acessibilidade UI Automation requer Windows.')
+        self.pointers = weakref.WeakSet()
+        self.ole = ctypes.WinDLL('ole32', use_last_error=True)
+        self.aut = ctypes.WinDLL('oleaut32', use_last_error=True)
+        self.ole.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        self.ole.CoInitializeEx.restype = ctypes.c_int32
+        self.ole.CoCreateInstance.argtypes = [ctypes.POINTER(GUID), ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)]
+        self.ole.CoCreateInstance.restype = ctypes.c_int32
+        self.aut.SysFreeString.argtypes = [ctypes.c_void_p]
+        resultado = self.ole.CoInitializeEx(None, 2)
+        if resultado < 0:
+            raise NativeUIError(f'Não foi possível inicializar COM: {resultado & 0xffffffff:08X}')
+        self.inicializado = True
+        pointer = ctypes.c_void_p()
+        clsid = GUID.from_string('ff48dba4-60ef-4201-aa87-54103eef594e')
+        iid = GUID.from_string('30cbe57d-d9d0-452a-ab13-7ac5ac4825ee')
+        try:
+            self.check(self.ole.CoCreateInstance(ctypes.byref(clsid), None, 1, ctypes.byref(iid), ctypes.byref(pointer)))
+            self.obj = COMPointer(self, pointer)
+        except Exception:
+            self.ole.CoUninitialize()
+            self.inicializado = False
+            raise
+
+    @staticmethod
+    def check(result):
+        if result < 0:
+            raise NativeUIError(f'Falha na acessibilidade do Windows: HRESULT {result & 0xffffffff:08X}')
+
+    def method(self, pointer, index, result=ctypes.c_int32, args=()):
+        if isinstance(pointer, COMPointer):
+            pointer = pointer.pointer
+        table = ctypes.cast(pointer, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        fn = ctypes.WINFUNCTYPE(result, ctypes.c_void_p, *args)(table[index])
+        return lambda *values: fn(pointer, *values)
+
+    def string(self, pointer, method):
+        value = ctypes.c_void_p()
+        self.check(self.method(pointer, method, args=(ctypes.POINTER(ctypes.c_void_p),))(ctypes.byref(value)))
+        try:
+            return ctypes.wstring_at(value) if value.value else ''
+        finally:
+            if value.value:
+                self.aut.SysFreeString(value)
+
+    def integer(self, pointer, method):
+        value = ctypes.c_int32()
+        self.check(self.method(pointer, method, args=(ctypes.POINTER(ctypes.c_int32),))(ctypes.byref(value)))
+        return value.value
+
+    def rectangle(self, pointer):
+        value = RECT()
+        self.check(self.method(pointer, 43, args=(ctypes.POINTER(RECT),))(ctypes.byref(value)))
+        return value.left, value.top, value.right, value.bottom
+
+    def root(self, hwnd):
+        pointer = ctypes.c_void_p()
+        self.check(self.method(self.obj, 6, args=(ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)))(hwnd, ctypes.byref(pointer)))
+        return COMPointer(self, pointer)
+
+    def condition(self, control_type):
+        value = VARIANT()
+        value.vt, value.integer = 3, control_type
+        pointer = ctypes.c_void_p()
+        self.check(self.method(self.obj, 23, args=(ctypes.c_int32, VARIANT, ctypes.POINTER(ctypes.c_void_p)))(30003, value, ctypes.byref(pointer)))
+        return COMPointer(self, pointer)
+
+    def findall(self, root, control_type):
+        condition = self.condition(control_type)
+        pointer = ctypes.c_void_p()
+        self.check(self.method(root, 6, args=(ctypes.c_int32, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)))(4, condition.pointer, ctypes.byref(pointer)))
+        array = COMPointer(self, pointer)
+        count = self.integer(array, 3)
+        if count > 4000:
+            raise NativeUIError('A árvore de acessibilidade está grande demais; reduza o histórico visível antes de iniciar.')
+        result = []
+        for index in range(count):
+            element = ctypes.c_void_p()
+            self.check(self.method(array, 4, args=(ctypes.c_int32, ctypes.POINTER(ctypes.c_void_p)))(index, ctypes.byref(element)))
+            result.append(COMPointer(self, element))
+        return result
+
+    def pattern(self, element, pattern_id):
+        iids = {10002:'a94cd8b1-0844-4cd6-9d2d-640537ab39e9',
+                10018:'828055ad-355b-4435-86d5-3b51c14a9b1b',
+                10014:'32eba289-3583-42c9-9c59-3b6d9a1e9b6a'}
+        iid = GUID.from_string(iids[pattern_id])
+        value = ctypes.c_void_p()
+        result = self.method(element, 14, args=(ctypes.c_int32, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)))(pattern_id, ctypes.byref(iid), ctypes.byref(value))
+        return COMPointer(self, value) if result >= 0 and value.value else None
+
+    def read_value(self, element):
+        # Value, Text and Legacy accessibility are standard native Windows patterns.
+        valor_vazio = None
+        for pattern_id, method in ((10002, 4), (10018, 8)):
+            pattern = self.pattern(element, pattern_id)
+            if pattern:
+                try:
+                    valor = self.string(pattern, method)
+                    if valor:
+                        return valor
+                    valor_vazio = valor
+                except NativeUIError:
+                    pass
+        text = self.pattern(element, 10014)
+        if text:
+            range_pointer = ctypes.c_void_p()
+            self.check(self.method(text, 7, args=(ctypes.POINTER(ctypes.c_void_p),))(ctypes.byref(range_pointer)))
+            text_range = COMPointer(self, range_pointer)
+            value = ctypes.c_void_p()
+            self.check(self.method(text_range, 12, args=(ctypes.c_int32, ctypes.POINTER(ctypes.c_void_p)))(-1, ctypes.byref(value)))
+            try:
+                return ctypes.wstring_at(value) if value.value else ''
+            finally:
+                if value.value:
+                    self.aut.SysFreeString(value)
+        return valor_vazio
+
+    def optional_string(self, pointer, method):
+        try:
+            return self.string(pointer, method)
+        except NativeUIError:
+            return ''
+
+    def info(self, pointer, control_type=None):
+        kind = control_type or self.integer(pointer, 21)
+        rect = self.rectangle(pointer)
+        try:
+            value = self.read_value(pointer) if kind == 50004 else None
+        except NativeUIError:
+            value = None
+        return Elemento(self.string(pointer, 23), kind, rect, bool(self.integer(pointer, 28)),
+                        bool(self.integer(pointer, 38)), value,
+                        self.optional_string(pointer, 29), self.optional_string(pointer, 31), self.optional_string(pointer, 46), pointer)
+
+    def nodes(self, hwnd):
+        root = self.root(hwnd)
+        documents = self.findall(root, 50030)
+        candidates = []
+        for doc in documents:
+            try:
+                name, rect = self.string(doc, 23), self.rectangle(doc)
+                if 'whatsapp' in normalizar(name) and rect[2]-rect[0] > 200 and rect[3]-rect[1] > 200:
+                    candidates.append(doc)
+            except NativeUIError:
+                continue
+        if len(candidates) != 1:
+            raise NativeUIError('O Chrome não expôs um único documento WhatsApp à acessibilidade. Ative a aba WhatsApp; esta versão não usará posições presumidas.')
+        result = []
+        for kind in (50000, 50003, 50004, 50007, 50009, 50011, 50020, 50025, 50026, 50032):
+            for ptr in self.findall(candidates[0], kind):
+                try:
+                    info = self.info(ptr, kind)
+                    if info.visivel:
+                        result.append(info)
+                except NativeUIError:
+                    continue
+        return result
+
+    def refresh(self, element):
+        return self.info(element.nativo, element.tipo)
+
+    def focused(self, element):
+        return bool(self.integer(element.nativo, 26))
+
+    def hit_test(self, element):
+        left, top, right, bottom = element.rect
+        pointer = ctypes.c_void_p()
+        point = POINT((left+right)//2, (top+bottom)//2)
+        self.check(self.method(self.obj, 7, args=(POINT, ctypes.POINTER(ctypes.c_void_p)))(point, ctypes.byref(pointer)))
+        hit = COMPointer(self, pointer)
+        equal = ctypes.c_int32()
+        self.check(self.method(self.obj, 3, args=(ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32)))(hit.pointer, element.nativo.pointer, ctypes.byref(equal)))
+        if equal.value:
+            return True
+        return bool(element.nome) and normalizar(self.string(hit, 23)) == normalizar(element.nome)
+
+    def close(self):
+        if self.inicializado:
+            for pointer in list(self.pointers):
+                pointer.close()
+            self.obj.close()
+            self.ole.CoUninitialize()
+            self.inicializado = False
+
+
+def gravar_bmp(destino, largura, altura, pixels):
+    import struct
+    if largura <= 0 or altura <= 0 or len(pixels) != largura * altura * 4:
+        raise ValueError('Dimensões ou pixels BMP inválidos.')
+    cabecalho = struct.pack('<2sIHHI', b'BM', 54+len(pixels), 0, 0, 54)
+    info = struct.pack('<IiiHHIIiiII', 40, largura, altura, 1, 32, 0, len(pixels), 0, 0, 0, 0)
+    Path(destino).write_bytes(cabecalho + info + pixels)
+
+
+def capturar_bmp(desktop, destino):
+    desktop.proteger()
+    left, top, right, bottom = desktop.rect()
+    w, h = right-left, bottom-top
+    if not (0 < w <= 8192 and 0 < h <= 8192):
+        raise RuntimeError('Janela com dimensões inválidas para captura.')
+    c = ctypes
+    user, gdi = desktop.api, c.WinDLL('gdi32', use_last_error=True)
+    user.GetDC.argtypes, user.GetDC.restype = [c.c_void_p], c.c_void_p
+    user.ReleaseDC.argtypes = [c.c_void_p, c.c_void_p]
+    for name, args, result in (
+        ('CreateCompatibleDC', [c.c_void_p], c.c_void_p),
+        ('CreateCompatibleBitmap', [c.c_void_p,c.c_int32,c.c_int32], c.c_void_p),
+        ('SelectObject', [c.c_void_p,c.c_void_p], c.c_void_p),
+        ('DeleteObject', [c.c_void_p], c.c_int32), ('DeleteDC', [c.c_void_p], c.c_int32),
+        ('BitBlt', [c.c_void_p,c.c_int32,c.c_int32,c.c_int32,c.c_int32,c.c_void_p,c.c_int32,c.c_int32,c.c_uint32], c.c_int32),
+        ('GetDIBits', [c.c_void_p,c.c_void_p,c.c_uint32,c.c_uint32,c.c_void_p,c.c_void_p,c.c_uint32], c.c_int32),
+    ):
+        function = getattr(gdi, name)
+        function.argtypes, function.restype = args, result
+    screen = user.GetDC(None)
+    memory = bitmap = previous = None
+    try:
+        memory = gdi.CreateCompatibleDC(screen)
+        bitmap = gdi.CreateCompatibleBitmap(screen, w, h)
+        if not screen or not memory or not bitmap:
+            raise RuntimeError('Não foi possível criar a captura nativa.')
+        previous = gdi.SelectObject(memory, bitmap)
+        if not gdi.BitBlt(memory,0,0,w,h,screen,left,top,0x00CC0020|0x40000000):
+            raise RuntimeError('Windows recusou a captura da janela.')
+        gdi.SelectObject(memory, previous)
+        previous = None
+        import struct
+        info = c.create_string_buffer(struct.pack('<IiiHHIIiiII',40,w,h,1,32,0,w*h*4,0,0,0,0))
+        pixels = c.create_string_buffer(w*h*4)
+        if gdi.GetDIBits(memory,bitmap,0,h,pixels,info,0) != h:
+            raise RuntimeError('Não foi possível ler todos os pixels da captura.')
+        gravar_bmp(destino,w,h,pixels.raw)
+        return True
+    finally:
+        if previous and memory:
+            gdi.SelectObject(memory, previous)
+        if bitmap:
+            gdi.DeleteObject(bitmap)
+        if memory:
+            gdi.DeleteDC(memory)
+        if screen:
+            user.ReleaseDC(None, screen)
+
+
+ADICIONAR = ('Adicionar aos contatos', 'Adicionar a contatos', 'Adicionar aos contactos', 'Adicionar contato', 'Add to contacts', 'Add contact')
+EDITAR = ('Editar contato', 'Editar contacto', 'Edit contact')
+CRIAR = ('Criar contato', 'Criar novo contato', 'Novo contato', 'Create contact', 'Create new contact', 'New contact')
+
+
+def texto_comparavel(texto):
+    return ' '.join(unicodedata.normalize('NFC', texto or '').split())
+
+
+def correspondencia_nomes(elementos, nomes, tipos=None):
+    aceitos = {normalizar(n) for n in nomes}
+    return [e for e in elementos if e.visivel and e.habilitado
+            and (tipos is None or e.tipo in tipos) and re.sub(r'[\s:*]+$', '', normalizar(e.nome)) in aceitos]
+
+
+class TelaNativa:
+    def __init__(self, parar, log, desktop=None, client=None):
         self.parar, self.log = parar, log
         self.desktop = desktop if desktop is not None else DesktopWindows()
-        self.pasta = Path(pasta)
-        self.pasta.mkdir(parents=True, exist_ok=True)
-        self.arquivo = self.pasta / 'calibracao.json'
-        self.config = json.loads(self.arquivo.read_text(encoding='utf-8')) if self.arquivo.exists() else {'controles': {}, 'areas': {}}
-        self.ocr = ocr
-        self.modelos = {}
+        self.client_injetado = client
+        self.local = threading.local()
+        self.ultimos = []
+        self.numero_atual = None
+
+    @property
+    def client(self):
+        if self.client_injetado is not None:
+            return self.client_injetado
+        if not hasattr(self.local, 'client'):
+            self.local.client = UIAWindows()
+        return self.local.client
+
+    def encerrar_thread(self):
+        if hasattr(self.local, 'client'):
+            self.local.client.close()
+            del self.local.client
 
     def conectar(self):
         if not self.desktop.ativar('WhatsApp'):
-            raise RuntimeError('Deixe uma única janela do Chrome com a aba WhatsApp ativa e tente conectar novamente.')
-        return self.desktop.capturar()
+            raise RuntimeError('Abra uma única janela do Chrome com a aba WhatsApp ativa e tente conectar novamente.')
+        self.desktop.proteger()
 
-    def frame(self):
+    def snapshot(self):
+        self.conferir_parada()
+        self.desktop.proteger()
+        elementos = self.client.nodes(self.desktop.janela)
+        self.ultimos = [{'nome': e.nome, 'tipo': e.tipo, 'rect': list(e.rect), 'habilitado': e.habilitado,
+                         'ajuda': e.ajuda, 'aria': e.aria} for e in elementos]
+        return elementos
+
+    def conferir_parada(self):
         if self.parar.is_set():
             raise InterruptedError()
-        frame = self.desktop.capturar()
-        esperado = self.config.get('tamanho')
-        if esperado and [frame.shape[1], frame.shape[0]] != esperado:
-            raise RuntimeError('Tamanho da janela mudou. Restaure o tamanho usado na calibração ou calibre novamente.')
-        return frame
-
-    def validar(self):
-        faltam = sorted(OBRIGATORIOS - self.config['controles'].keys())
-        faltam += sorted(AREAS.keys() - self.config['areas'].keys())
-        if faltam:
-            raise RuntimeError('Calibração necessária antes do lote: ' + ', '.join(faltam))
 
     def aguardar(self, funcao, segundos, etapa):
         fim = time.monotonic() + segundos
+        ultimo = ''
         while time.monotonic() < fim:
-            if self.parar.is_set():
-                raise InterruptedError()
-            resultado = funcao()
-            if resultado:
-                return resultado
+            self.conferir_parada()
+            try:
+                resultado = funcao()
+                if resultado:
+                    return resultado
+            except NativeUIError as erro:
+                ultimo = str(erro)
             if self.parar.wait(0.2):
                 raise InterruptedError()
-        raise TimeoutError('Tempo esgotado: ' + etapa)
+        raise TimeoutError('Tempo esgotado: ' + etapa + ('. ' + ultimo if ultimo else ''))
 
-    def localizar(self, nome, frame=None):
-        cfg = self.config['controles'].get(nome)
-        if not cfg:
-            return None
-        frame = self.frame() if frame is None else frame
-        if nome not in self.modelos:
-            imagem = cv2.imread(str(self.pasta / (nome + '.png')))
-            if imagem is None:
-                raise RuntimeError('Modelo ausente ou ilegível: ' + nome)
-            self.modelos[nome] = imagem
-        return localizar_imagem(frame, self.modelos[nome], cfg.get('limite', 0.90), cfg['busca'])
+    def buscar(self, nomes, tipos=(50000, 50011), elementos=None):
+        encontrados = correspondencia_nomes(self.snapshot() if elementos is None else elementos, nomes, tipos)
+        if len(encontrados) > 1:
+            raise RuntimeError('Controle ambíguo na acessibilidade: ' + '/'.join(nomes))
+        return encontrados[0] if encontrados else None
 
-    def clicar(self, nome, segundos=10):
-        def acao():
-            frame = self.frame()
-            match = self.localizar(nome, frame)
-            if match:
-                cfg = self.config['controles'][nome]
-                self.desktop.clicar(match['x']+cfg['clique'][0], match['y']+cfg['clique'][1])
-                self.log(f'OpenCV: {nome} identificado ({match["score"]:.3f}); clique nativo.')
-                return True
-            return False
-        return self.aguardar(acao, segundos, 'localizar ' + nome)
+    def clicar_elemento(self, elemento):
+        self.conferir_parada()
+        atual = self.client.refresh(elemento)
+        if not atual.visivel or not atual.habilitado:
+            raise NativeUIError('Controle deixou de estar visível/habilitado: ' + elemento.nome)
+        if not self.client.hit_test(atual):
+            raise RuntimeError('O centro do controle está coberto por outro elemento. Clique bloqueado: ' + elemento.nome)
+        self.desktop.rect_anterior = self.desktop.rect()
+        left, top, _, _ = self.desktop.rect_anterior
+        x1,y1,x2,y2 = atual.rect
+        self.desktop.clicar((x1+x2)//2-left, (y1+y2)//2-top)
+        self.log('Clique nativo no controle: ' + (atual.nome or 'sem nome'))
 
-    def ler(self, area, frame=None):
-        if area not in self.config['areas']:
-            raise RuntimeError('Região OCR não calibrada: ' + area)
-        frame = self.frame() if frame is None else frame
-        x1, y1, x2, y2 = self.config['areas'][area]
-        crop = frame[y1:y2, x1:x2]
-        if not crop.size:
-            raise RuntimeError('Região OCR vazia: ' + area)
-        if self.ocr is None:
-            from rapidocr_onnxruntime import RapidOCR
-            self.ocr = RapidOCR(intra_op_num_threads=2, inter_op_num_threads=1)
-        result, _ = self.ocr(crop)
-        textos = [str(row[1]) for row in (result or []) if float(row[2]) >= 0.85]
-        return '\n'.join(textos)
+    def clicar(self, nomes, segundos=10, tipos=(50000,50011)):
+        elemento = self.aguardar(lambda: self.buscar(nomes, tipos), segundos, 'localizar ' + '/'.join(nomes))
+        self.clicar_elemento(elemento)
+        return elemento
 
-    def escrever_campo(self, alvo, texto, area):
-        self.clicar(alvo)
-        self.desktop.escrever(texto, self.parar, tab=True)
-        self.aguardar(lambda: texto_comparavel(self.ler(area)) == texto_comparavel(texto), 5, 'conferir texto em ' + alvo)
+    def campo_nome(self, elementos=None):
+        return self.buscar(('Nome', 'Primeiro nome', 'Nome completo', 'Name', 'First name', 'Full name'), (50004,), elementos)
 
-    def abrir_numero(self, numero):
-        self.desktop.proteger()
-        self.desktop.atalho(0x11, 0x4C)
-        self.desktop.escrever('https://web.whatsapp.com/send?' + urlencode({'phone': numero}), self.parar)
-        self.desktop.atalho(0x0D)
-        # Do not mistake the old conversation still visible during navigation for readiness.
-        self.aguardar(lambda: self.localizar('conversa') is None, 15, 'a conversa anterior sair da tela')
-        def resposta():
-            frame = self.frame()
-            if self.localizar('recusado', frame):
-                return 'recusado'
-            return 'conversa' if self.localizar('conversa', frame) else False
-        return self.aguardar(resposta, 90, 'abrir destinatário ou exibir recusa')
+    def campo_telefone(self, elementos=None):
+        return self.buscar(('Número de telefone', 'Telefone', 'Número do telefone', 'Phone number', 'Phone'), (50004,), elementos)
+
+    def campo_mensagem(self, elementos=None):
+        encontrados = correspondencia_nomes(self.snapshot() if elementos is None else elementos,
+            ('Digite uma mensagem', 'Mensagem', 'Type a message', 'Message'), (50004,))
+        if len(encontrados) > 1:
+            raise RuntimeError('Mais de um campo de mensagem exposto; envio bloqueado.')
+        return encontrados[0] if encontrados else None
+
+    def ler(self, elemento):
+        atual = self.client.refresh(elemento)
+        if atual.valor is None:
+            raise NativeUIError('O Chrome não expôs o valor deste campo à acessibilidade: ' + elemento.nome)
+        return str(atual.valor)
+
+    def digitar(self, elemento, texto, tab=True):
+        self.clicar_elemento(elemento)
+        self.aguardar(lambda: self.client.focused(elemento), 3, 'confirmar foco no campo ' + elemento.nome)
+        # Native SendInput only; the accessibility API is used to read/locate.
+        self.desktop.escrever(texto, self.parar, tab=False, conferir_foco=lambda: self.client.focused(elemento))
+        if tab:
+            self.desktop.atalho(0x09)
+        self.aguardar(lambda: texto_comparavel(self.ler(elemento)) == texto_comparavel(texto), 5, 'conferir valor digitado em ' + elemento.nome)
+
+    def menu(self):
+        elementos = self.snapshot()
+        left,top,right,bottom = self.desktop.rect()
+        candidatos = correspondencia_nomes(elementos, ('Menu','Mais opções','More options'), (50000,))
+        candidatos = [e for e in candidatos if e.rect[0] > left+(right-left)*.4 and e.rect[1] < top+(bottom-top)*.3]
+        if len(candidatos) != 1:
+            raise NativeUIError('Não identifiquei um único menu no cabeçalho da conversa pela acessibilidade.')
+        self.clicar_elemento(candidatos[0])
 
     def estado_contato(self):
-        self.clicar('menu')
+        self.menu()
         def estado():
-            frame = self.frame()
-            editar, adicionar = self.localizar('editar', frame), self.localizar('adicionar', frame)
+            elementos = self.snapshot()
+            editar = self.buscar(EDITAR, elementos=elementos)
+            adicionar = self.buscar(ADICIONAR, elementos=elementos)
             if editar and adicionar:
-                raise RuntimeError('Menu ambíguo: Adicionar e Editar foram encontrados ao mesmo tempo.')
+                raise RuntimeError('Adicionar e Editar presentes ao mesmo tempo. Estado inconclusivo.')
             return 'existente' if editar else ('novo' if adicionar else False)
         try:
-            return self.aguardar(estado, 5, 'Adicionar ou Editar contato')
+            return self.aguardar(estado, 5, 'Adicionar/Editar contato')
         except TimeoutError:
-            if 'dados' not in self.config['controles']:
+            dados = self.buscar(('Dados do contato','Dados do contacto','Informações do contato','Contact info'))
+            if not dados:
                 raise
-            self.clicar('dados')
-            if 'menu_dados' in self.config['controles']:
-                self.clicar('menu_dados')
-            return self.aguardar(estado, 10, 'Adicionar/Editar nos dados do contato')
+            self.clicar_elemento(dados)
+            def nos_dados():
+                e = estado()
+                if e:
+                    return e
+                elementos = self.snapshot()
+                editar = self.buscar(('Editar','Edit'), elementos=elementos)
+                if editar and self.telefone_confirmado(self.numero_atual, elementos):
+                    return 'existente'
+                return False
+            return self.aguardar(nos_dados, 10, 'contato salvo nos dados do contato')
+
+    def aviso_recusa(self, elementos=None):
+        elementos = self.snapshot() if elementos is None else elementos
+        for e in elementos:
+            if e.tipo not in (50020,50025,50026,50032):
+                continue
+            texto = normalizar(e.nome)
+            if re.search(r'(numero.*(?:invalido|nao (?:esta |e )?(?:registrado )?no whatsapp)|phone number.*(?:invalid|not (?:registered )?on whatsapp))', texto):
+                return e
+        return None
+
+    def abrir_numero(self, numero):
+        self.numero_atual = numero
+        self.desktop.atalho(0x11, 0x4C)
+        self.desktop.escrever('https://web.whatsapp.com/send?' + urlencode({'phone':numero}), self.parar)
+        self.desktop.atalho(0x0D)
+        def saiu():
+            try:
+                return self.campo_mensagem() is None
+            except NativeUIError:
+                return True
+        self.aguardar(saiu, 15, 'a conversa anterior sair da tela')
+        def resposta():
+            elementos = self.snapshot()
+            if self.aviso_recusa(elementos):
+                return 'recusado'
+            return 'conversa' if self.campo_mensagem(elementos) else False
+        return self.aguardar(resposta, 90, 'abrir destinatário na acessibilidade')
+
+    def telefone_confirmado(self, numero, elementos=None):
+        elementos = self.snapshot() if elementos is None else elementos
+        campos = correspondencia_nomes(elementos,('Número de telefone','Telefone','Número do telefone','Phone number','Phone'),(50004,))
+        if campos:
+            if len(campos) != 1 or campos[0].valor is None:
+                return False
+            campo = campos[0]
+            try:
+                if numero_brasileiro(str(campo.valor)) != numero:
+                    return False
+            except ValueError:
+                return False
+            bruto = digitos(str(campo.valor))
+            if bruto.startswith('55') and len(bruto) in (12,13):
+                return True
+            # Read country next to this field, not unrelated numbers in chat history.
+            return any(re.search(r'\+\s*55(?:\D|$)|\bBR\b|\bBrasil\b',e.nome,re.I)
+                       and e.rect[3]>=campo.rect[1]-120 and e.rect[1]<=campo.rect[3]+100
+                       for e in elementos if e.tipo in (50003,50000,50020))
+        # Contact-info drawers can show the complete phone as non-editable text.
+        left,top,right,bottom = self.desktop.rect()
+        for e in elementos:
+            if e.tipo != 50020 or e.rect[0] < left+(right-left)*.35:
+                continue
+            for candidato in re.findall(r'\+?\d[\d\s().-]{8,}\d',e.nome):
+                bruto = digitos(candidato)
+                if bruto.startswith('55') and len(bruto) in (12,13) and bruto == numero:
+                    return True
+        return False
+
+    def validar_formulario(self, numero):
+        elementos = self.snapshot()
+        if not self.telefone_confirmado(numero, elementos):
+            raise NativeUIError('O telefone/país do formulário não corresponde exatamente ao CSV, ou o Chrome não expôs o valor. Cadastro bloqueado.')
+        for e in elementos:
+            if e.tipo == 50004 and ('invalid=true' in normalizar(e.aria) or 'invalid:true' in normalizar(e.aria)):
+                raise NativeUIError('A interface sinaliza campo inválido: ' + e.nome)
+
+    def tem_formulario(self, elementos=None):
+        elementos = self.snapshot() if elementos is None else elementos
+        return any(normalizar(e.nome) in ('novo contato','novo contacto','new contact','criar contato','create contact') for e in elementos if e.tipo in (50020,50025,50026,50032)) or self.campo_nome(elementos) is not None
 
     def fechar_formulario(self):
-        self.clicar('fechar', 5)
+        elementos = self.snapshot()
+        nome = self.campo_nome(elementos)
+        if nome is None:
+            raise NativeUIError('Não identifiquei o formulário do contato para fechar pelo X.')
+        fechar = correspondencia_nomes(elementos, ('Fechar','Close','Fechar painel','Close panel'), (50000,))
+        fechar = [e for e in fechar if e.rect[3] <= nome.rect[1] and e.rect[0] >= nome.rect[0]-150]
+        if len(fechar) != 1:
+            raise NativeUIError('O X do painel Novo contato não tem identificação acessível única. Página não será recarregada.')
+        self.clicar_elemento(fechar[0])
         descartou = False
         def fechado():
             nonlocal descartou
-            frame = self.frame()
-            if self.localizar('aviso_descartar', frame):
+            elementos = self.snapshot()
+            aviso = any(any(p in normalizar(e.nome) for p in ('deseja descartar as mudancas','descartar alteracoes','discard changes','discard your changes')) for e in elementos)
+            if aviso:
                 if not descartou:
-                    self.clicar('descartar', 5)
+                    self.clicar(('Descartar','Discard'),5)
                     descartou = True
                 return False
-            return self.localizar('nome', frame) is None
-        self.aguardar(fechado, 10, 'fechar formulário pelo X/Descartar')
-        self.log('Formulário fechado pelo X e Descartar, sem recarregar a página.')
+            return not self.tem_formulario(elementos)
+        self.aguardar(fechado, 10, 'confirmar X/Descartar')
+        self.log('Formulário fechado pelo X/Descartar, sem F5.')
+
+    def avisos_salvo(self):
+        return {(e.nome,e.rect) for e in self.snapshot() if e.tipo in (50020,50025,50026) and re.search(
+            r'\b(?:contato|contacto) (?:foi )?(?:salvo|adicionado|guardado)\b|\bcontact (?:was )?(?:saved|added)\b', normalizar(e.nome))}
+
+    def mensagens_saida(self):
+        mensagens = []
+        for e in self.snapshot():
+            if e.tipo not in (50007,50025,50026):
+                continue
+            identificacao = normalizar(e.automation_id + ' ' + e.aria)
+            if 'message-out' in identificacao or 'outgoing' in identificacao or re.match(r'^(voce|you)\s*:',normalizar(e.nome)):
+                mensagens.append(texto_comparavel(e.nome))
+        return mensagens
 
     def save_screenshot(self, destino):
-        return cv2.imwrite(str(destino), self.desktop.capturar())
+        return capturar_bmp(self.desktop, Path(destino).with_suffix('.bmp'))
 
     def quit(self):
-        # The user's normal Chrome window is not owned by this application.
-        pass
-
-
-class Calibracao(tk.Toplevel):
-    def __init__(self, app):
-        super().__init__(app.root)
-        self.app = app
-        self.title('Calibração OpenCV — janela, escala e tema fixos')
-        self.geometry('760x300')
-        ttk.Label(self, text='Abra manualmente a tela/menu no Chrome. Escolha o controle ou área e clique Capturar.\nPara botões: selecione uma imagem estável e depois o ponto exato do clique.\nPara áreas OCR: selecione somente o texto/valor que será conferido.', wraplength=720).pack(pady=12)
-        self.itens = list(CONTROLES) + list(AREAS)
-        self.slot = tk.StringVar(value=self.itens[0])
-        combo = ttk.Combobox(self, textvariable=self.slot, values=self.itens, state='readonly', width=35)
-        combo.pack()
-        self.descricao = tk.StringVar(value=CONTROLES[self.itens[0]])
-        combo.bind('<<ComboboxSelected>>', lambda e: self.descricao.set({**CONTROLES, **AREAS}[self.slot.get()]))
-        ttk.Label(self, textvariable=self.descricao, wraplength=720).pack(pady=8)
-        ttk.Button(self, text='Capturar controle/área', command=self.capturar).pack(pady=6)
-        ttk.Label(self, text='Calibre o ✓ inferior de Salvar, não o ✓ ao lado do telefone.\nA mensagem, os contatos, perfil e imagens ficam locais. Não compartilhe a pasta .local.', wraplength=720).pack(pady=6)
-
-    def capturar(self):
-        if self.app.ocupado:
-            return
-        self.withdraw()
-        self.app.root.withdraw()
-        self.after(300, self.obter)
-
-    def obter(self):
-        try:
-            tela = self.app.driver
-            frame = tela.conectar()
-            self.selecionar(frame, self.slot.get())
-        except Exception as erro:
-            self.app.root.deiconify()
-            self.deiconify()
-            messagebox.showerror('Calibração', str(erro), parent=self)
-
-    def selecionar(self, frame, slot):
-        from PIL import ImageTk
-        h, w = frame.shape[:2]
-        escala = min(1200/w, 720/h, max(200,self.winfo_screenwidth()-80)/w, max(200,self.winfo_screenheight()-120)/h, 1)
-        janela = tk.Toplevel(self)
-        janela.title('Arraste a imagem/área; depois clique no ponto de ação. Esc cancela.')
-        rgb = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        foto = ImageTk.PhotoImage(rgb.resize((int(w*escala), int(h*escala))))
-        canvas = tk.Canvas(janela, width=foto.width(), height=foto.height(), cursor='crosshair')
-        canvas.pack()
-        canvas.create_image(0, 0, anchor='nw', image=foto)
-        canvas.image = foto
-        estado = {'inicio': None, 'rect': None, 'area': None}
-        def terminar():
-            janela.destroy()
-            self.app.root.deiconify()
-            self.deiconify()
-        def salvar(area, clique=None):
-            tela = self.app.driver
-            tamanho = [w, h]
-            if tela.config.get('tamanho') and tela.config['tamanho'] != tamanho:
-                raise ValueError('Restaure o tamanho anterior da janela ou reinicie toda a calibração.')
-            tela.config['tamanho'] = tamanho
-            if slot in AREAS:
-                tela.config['areas'][slot] = list(area)
-            else:
-                x1,y1,x2,y2 = area
-                modelo = frame[y1:y2,x1:x2]
-                if float(cv2.cvtColor(modelo, cv2.COLOR_BGR2GRAY).std()) < 3:
-                    raise ValueError('Seleção sem detalhes. Capture um rótulo ou ícone completo.')
-                margem_x, margem_y = int(w*.12), int(h*.12)
-                tela.config['controles'][slot] = {'clique': [clique[0]-x1, clique[1]-y1], 'limite': .90,
-                    'busca': [max(0,x1-margem_x), max(0,y1-margem_y), min(w,x2+margem_x), min(h,y2+margem_y)]}
-                if not cv2.imwrite(str(tela.pasta / (slot+'.png')), modelo):
-                    raise RuntimeError('Não foi possível salvar a imagem.')
-                tela.modelos.pop(slot, None)
-            temp = tela.arquivo.with_suffix('.tmp')
-            temp.write_text(json.dumps(tela.config, ensure_ascii=False, indent=2), encoding='utf-8')
-            temp.replace(tela.arquivo)
-            self.app.log('Calibrado: ' + slot)
-            terminar()
-        def down(e):
-            try:
-                if estado['area']:
-                    salvar(estado['area'], (int(e.x/escala), int(e.y/escala)))
-                    return
-                estado['inicio'] = (e.x,e.y)
-                estado['rect'] = canvas.create_rectangle(e.x,e.y,e.x,e.y, outline='red', width=2)
-            except Exception as erro:
-                messagebox.showerror('Calibração', str(erro), parent=janela)
-        def move(e):
-            if estado['inicio'] and not estado['area']:
-                canvas.coords(estado['rect'], *estado['inicio'], e.x,e.y)
-        def up(e):
-            if not estado['inicio'] or estado['area']:
-                return
-            x,y = estado['inicio']
-            area = (max(0,int(min(x,e.x)/escala)),max(0,int(min(y,e.y)/escala)),min(w,int(max(x,e.x)/escala)),min(h,int(max(y,e.y)/escala)))
-            if area[2]-area[0] < 8 or area[3]-area[1] < 8:
-                return
-            estado['area'] = area
-            if slot in AREAS:
-                salvar(area)
-            else:
-                janela.title('Agora clique no ponto onde a ação deve acontecer')
-        canvas.bind('<ButtonPress-1>', down)
-        canvas.bind('<B1-Motion>', move)
-        canvas.bind('<ButtonRelease-1>', up)
-        janela.bind('<Escape>', lambda e: terminar())
-        janela.protocol('WM_DELETE_WINDOW', terminar)
+        self.encerrar_thread()
 
 
 class App:
@@ -683,7 +967,6 @@ class App:
         for titulo, comando in (
             ("Carregar CSV", self.carregar),
             ("Chrome / QR", self.chrome),
-            ("Calibrar OpenCV", self.calibrar),
             ("Iniciar", self.iniciar),
         ):
             botao = ttk.Button(
@@ -799,6 +1082,11 @@ class App:
                 )
 
             finally:
+                if self.driver is not None:
+                    try:
+                        self.driver.encerrar_thread()
+                    except Exception:
+                        pass
                 self.eventos.put(("fim", None))
 
         threading.Thread(
@@ -1010,156 +1298,129 @@ class App:
 
     def chrome(self):
         if not sistema_windows():
-            messagebox.showerror('Windows necessário', 'Esta versão controla o Chrome pela tela e pelo Windows SendInput. Execute em Windows com desktop visível.')
+            messagebox.showerror('Windows necessário', 'Este script usa apenas a biblioteca padrão do Python e as APIs nativas do Windows. Execute no Windows com o Chrome visível.')
             return
         if self.ocupado:
-            return
-        if self.envio_pendente:
-            messagebox.showwarning('Envio incerto', 'Confira manualmente a conversa antes de qualquer nova tentativa. Reiniciar não comprova que a mensagem não foi enviada.')
             return
         try:
             if self.driver is None:
-                self.driver = TelaVisual(self.parar, self.log)
+                self.driver = TelaNativa(self.parar, self.log)
             self.driver.conectar()
-            self.log('Chrome normal conectado pela janela. Nenhum WebDriver foi iniciado. Faça login por QR no navegador, se necessário.')
+            self.log('Chrome normal conectado. Sem instalação de pacotes, sem calibração e sem WebDriver.')
         except Exception as erro:
-            messagebox.showerror('Chrome / QR', str(erro) + '\nAbra manualmente https://web.whatsapp.com/ no Chrome normal e deixe essa aba ativa.')
-
-    def calibrar(self):
-        if self.ocupado:
-            return
-        if self.driver is None:
-            self.chrome()
-        if self.driver is not None:
-            Calibracao(self)
+            messagebox.showerror('Chrome / QR', str(erro) + '\nAbra manualmente web.whatsapp.com no Chrome, faça login e deixe a aba ativa.')
 
     def abrir_e_detectar(self, numero):
-        self.driver.validar()
         self.numero_atual = numero
         self.cadastro_confirmado = None
-        self.definir_etapa(f'1/5: abrindo +{numero} com teclado nativo...')
-        resposta = self.driver.abrir_numero(numero)
-        if resposta == 'recusado':
-            raise NumeroRecusado('Aviso de número recusado reconhecido visualmente.')
-        self.definir_etapa('2/5: verificando Adicionar/Editar contato por OpenCV...')
+        self.definir_etapa(f'1/5: abrindo +{numero} com teclas do Windows...')
+        if self.driver.abrir_numero(numero) == 'recusado':
+            raise NumeroRecusado('WhatsApp exibiu aviso de número inválido ou não registrado.')
+        self.definir_etapa('2/5: identificando Adicionar/Editar pela acessibilidade do Windows...')
         estado = self.driver.estado_contato()
         if estado == 'existente':
             self.driver.desktop.atalho(0x1B)
-            self.log(f'SKIP: +{numero} já está salvo; sem cadastro, envio ou espera.')
+            self.log(f'SKIP: +{numero} já estava salvo. Sem mensagem e sem espera.')
             return False
-        self.driver.clicar('adicionar')
+        self.driver.clicar(ADICIONAR)
         return True
 
     def fechar_aviso_numero(self):
-        self.definir_etapa('Fechando aviso de número recusado...')
-        self.driver.clicar('ok')
-        self.driver.aguardar(lambda: self.driver.localizar('recusado') is None, 5, 'aviso desaparecer')
-
-    def conferir_telefone_visual(self, numero):
-        texto = self.driver.ler('telefone_lido')
-        numeros = set()
-        for candidato in re.findall(r'\+?\d[\d\s().-]{8,}\d', texto):
-            try:
-                numeros.add(numero_brasileiro(candidato))
-            except ValueError:
-                pass
-        pais_brasil = bool(re.search(r'\+\s*55(?:\D|$)|\bBR\b|\bBrasil\b', texto, re.I))
-        if numeros == {numero} and pais_brasil:
-            self.log('OCR confirmou o telefone exato: +' + numero)
-            return
-        # No automatic equivalence between different digit strings, including 9th digit.
-        raise RuntimeError(f'OCR não confirmou o destinatário: esperado +{numero}, lido {texto!r}. Nenhum contato será salvo/enviado com essa divergência.')
+        self.driver.clicar(('OK','Ok'),5)
+        self.driver.aguardar(lambda: self.driver.aviso_recusa() is None,5,'fechar aviso de número recusado')
 
     def cadastrar(self, contato):
         tela, nome, numero = self.driver, contato['name'], contato['phone']
         for tentativa in range(2):
-            self.definir_etapa('3/5: abrindo formulário e digitando Nome por SendInput...')
+            self.definir_etapa('3/5: localizando o campo Nome pela acessibilidade...')
             def formulario():
-                frame = tela.frame()
-                if tela.localizar('nome', frame):
-                    return 'nome'
-                return 'criar' if tela.localizar('criar', frame) else False
-            estado = tela.aguardar(formulario, 20, 'formulário de contato')
-            if estado == 'criar':
-                tela.clicar('criar')
-            tela.escrever_campo('nome', nome, 'nome_lido')
-            self.conferir_telefone_visual(numero)
-            # Only click Save after name/phone OCR matches and WhatsApp shows valid phone.
-            self.definir_etapa('4/5: aguardando confirmação visual do telefone e botão Salvar (até 5s)...')
+                campo = tela.campo_nome()
+                if campo:
+                    return 'nome',campo
+                criar = tela.buscar(CRIAR)
+                return ('criar',criar) if criar else False
+            tipo,campo = tela.aguardar(formulario,20,'abrir formulário Novo contato')
+            if tipo == 'criar':
+                tela.clicar_elemento(campo)
+                campo = tela.aguardar(tela.campo_nome,10,'campo Nome')
+            tela.digitar(campo,nome)
+            self.log('Nome digitado pelo Windows e confirmado no campo: '+nome)
+            self.definir_etapa('4/5: conferindo o formulário e aguardando Salvar por até 5s...')
+            antes = tela.avisos_salvo()
             try:
-                tela.aguardar(lambda: tela.localizar('telefone_ok'), 5, 'WhatsApp validar o telefone')
-                tela.clicar('salvar', 5)
-            except TimeoutError:
+                tela.validar_formulario(numero)
+                tela.clicar(('Salvar','Guardar','Save','Salvar contato','Save contact','Concluir','Done'),5)
+            except (TimeoutError,NativeUIError) as erro:
                 if tentativa:
-                    raise RuntimeError('Formulário já foi reaberto pelo X uma vez e continua sem validação/Salvar.')
+                    raise RuntimeError('O formulário já foi reaberto pelo X uma vez: '+str(erro)) from erro
+                self.log(str(erro))
                 tela.fechar_formulario()
-                # Reopen via UI only: no address navigation or reload in recovery.
-                if tela.localizar('conversa'):
+                if tela.campo_mensagem():
                     estado = tela.estado_contato()
                     if estado == 'existente':
                         tela.desktop.atalho(0x1B)
                         self.cadastro_confirmado = numero
+                        self.log('Cadastro confirmado durante recuperação. Seguindo para o envio.')
                         return
-                    tela.clicar('adicionar')
-                else:
-                    # Optional direct add action on WhatsApp home screen.
-                    tela.clicar('adicionar')
+                tela.clicar(ADICIONAR+CRIAR)
                 continue
-            # A Save click is never repeated if its result becomes uncertain.
-            def salvo_ou_fechado():
-                frame = tela.frame()
-                if tela.localizar('salvo', frame):
-                    return 'salvo'
-                return 'fechado' if tela.localizar('nome', frame) is None else False
-            resultado = tela.aguardar(salvo_ou_fechado, 20, 'confirmar resultado do clique em Salvar')
-            if resultado != 'salvo':
-                resposta = tela.abrir_numero(numero)
-                if resposta != 'conversa' or tela.estado_contato() != 'existente':
-                    raise RuntimeError('Cadastro não confirmado pela interface. Mensagem bloqueada.')
+            # No retry after a Save click, even if confirmation is inconclusive.
+            def concluido():
+                avisos = tela.avisos_salvo()
+                if avisos-antes:
+                    return 'sucesso'
+                return 'fechado' if not tela.tem_formulario() else False
+            resultado = tela.aguardar(concluido,20,'confirmar cadastro salvo')
+            if resultado != 'sucesso':
+                if tela.abrir_numero(numero) != 'conversa' or tela.estado_contato() != 'existente':
+                    raise RuntimeError('Cadastro não confirmado. Mensagem bloqueada.')
                 tela.desktop.atalho(0x1B)
             self.cadastro_confirmado = numero
-            self.log('Cadastro confirmado. Próxima etapa: enviar a mensagem ao mesmo contato.')
+            self.log('Cadastro confirmado neste lote. Próxima etapa: ENVIAR, sem aplicar SKIP.')
             return
 
     def enviar(self, contato, texto):
-        numero = contato['phone']
+        numero,tela = contato['phone'],self.driver
         if self.cadastro_confirmado != numero:
-            raise RuntimeError('Este cadastro não foi confirmado. Envio bloqueado.')
+            raise RuntimeError('Cadastro deste destinatário não confirmado.')
         if self.envio_pendente:
-            raise RuntimeError('Há um envio incerto. Confira a conversa antes de reiniciar.')
-        tela = self.driver
-        self.definir_etapa('5/5: abrindo o número exato e conferindo rascunho por OCR...')
+            raise RuntimeError('Há envio incerto. Confira a conversa antes de reiniciar.')
+        self.definir_etapa('5/5: abrindo o número exato e conferindo o rascunho...')
         if tela.abrir_numero(numero) != 'conversa':
             raise RuntimeError('Destinatário não abriu antes do envio.')
-        if tela.ler('rascunho_lido').strip():
-            raise RuntimeError('Rascunho existente ou região OCR incorreta. Não será apagado nem misturado.')
-        mensagem = texto.replace('\r\n', '\n').replace('\r', '\n')
-        antes = texto_comparavel(tela.ler('saida_lida'))
+        campo = tela.aguardar(tela.campo_mensagem,15,'campo de mensagem')
+        if tela.ler(campo).strip():
+            raise RuntimeError('Existe rascunho. Não será apagado ou misturado.')
+        mensagem = texto.replace('\r\n','\n').replace('\r','\n')
         esperado = texto_comparavel(mensagem)
-        tela.escrever_campo('mensagem', mensagem, 'rascunho_lido')
-        # Count occurrences before/after, so an old copy is never proof of a new send.
-        ocorrencias = antes.count(esperado)
+        antes = sum(e.count(esperado) for e in tela.mensagens_saida())
+        tela.digitar(campo,mensagem,tab=False)
+        self.conferir_parada()
         self.envio_pendente = numero
         try:
-            tela.clicar('enviar', 5)
-            tela.aguardar(lambda: texto_comparavel(tela.ler('saida_lida')).count(esperado) > ocorrencias,
-                          30, 'nova mensagem de saída contendo o texto enviado')
+            tela.clicar(('Enviar','Send'),5)
+            tela.aguardar(lambda: sum(e.count(esperado) for e in tela.mensagens_saida()) > antes,30,
+                          'confirmar nova mensagem com marcador de saída')
         except Exception as erro:
-            raise RuntimeError('ENVIO INCERTO. Não repetir automaticamente; confira a conversa.') from erro
+            raise RuntimeError('ENVIO INCERTO. Não repetir automaticamente; confira manualmente a conversa.') from erro
         self.envio_pendente = None
-        self.log('Nova mensagem de saída observada por OCR. Entrega não confirmada.')
+        self.log('Nova mensagem de saída observada. Entrega não confirmada.')
 
     def diagnostico(self):
         if self.driver is None:
             return
+        pasta = Path(__file__).resolve().parent / 'diagnosticos'
+        pasta.mkdir(exist_ok=True)
+        nome = 'nativo_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         try:
-            pasta = Path(__file__).resolve().parent / 'diagnosticos'
-            pasta.mkdir(exist_ok=True)
-            destino = pasta / ('visual_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '.png')
-            if self.driver.save_screenshot(destino):
-                self.log('Captura LOCAL: ' + str(destino))
+            destino = pasta/(nome+'.json')
+            destino.write_text(json.dumps({'etapa':self.etapa,'controles':self.driver.ultimos},ensure_ascii=False,indent=2),encoding='utf-8')
+            self.log('Diagnóstico LOCAL de controles: '+str(destino))
+            imagem = pasta/(nome+'.bmp')
+            if self.driver.save_screenshot(imagem):
+                self.log('Captura LOCAL: '+str(imagem))
         except Exception as erro:
-            self.log('Falha ao capturar diagnóstico: ' + str(erro))
+            self.log('Não foi possível concluir a captura: '+str(erro))
 
 
 if __name__ == '__main__':

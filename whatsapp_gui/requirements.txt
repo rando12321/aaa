@@ -1,5 +1,1 @@
-numpy==2.2.6
-opencv-python==4.11.0.86
-Pillow==11.3.0
-rapidocr_onnxruntime==1.4.4
-onnxruntime==1.20.1
+# Nenhum pacote externo. O aplicativo usa somente a biblioteca padrão do Python.
