@@ -268,8 +268,14 @@ class BrowserTests(unittest.TestCase):
         self.serve(html)
         self.app.abrir_e_detectar(self.contact['phone'])
         original = self.app.esperar
-        self.app.esperar = lambda fn, segundos=30: original(fn, min(segundos, 1))
+        prazos_salvar = []
+        def esperar(fn, segundos=30):
+            if fn.__name__ == 'encontrar':
+                prazos_salvar.append(segundos)
+            return original(fn, min(segundos, 1))
+        self.app.esperar = esperar
         self.app.cadastrar(self.contact)
+        self.assertEqual(prazos_salvar, [5, 5])
         self.assertEqual(self.page.evaluate('localStorage.opens'), '2')
         self.assertEqual(self.page.evaluate('localStorage.savedName'), self.contact['name'])
         self.app.enviar(self.contact, 'Mensagem após recuperar formulário')

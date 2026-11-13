@@ -30,7 +30,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-VERSAO = "2026.11.13-v9-conferir-antes-de-reabrir"
+VERSAO = "2026.11.13-v10-salvar-limite-5s"
 
 IGNORADOS = {"11999999999", "5511999999999"}
 
@@ -737,7 +737,7 @@ class App:
         return False
 
     def confirmar_cadastro(self, campo):
-        self.definir_etapa("4/5: procurando o botão de salvar no formulário...")
+        self.definir_etapa("4/5: aguardando o botão de salvar por até 5 segundos...")
         def encontrar(driver):
             painel = self.painel_formulario(campo)
             if not painel:
@@ -769,7 +769,7 @@ class App:
                 return checks.length === 1 ? checks[0] : null;
                 """, painel, campo,
             ) or False
-        botao = self.esperar(encontrar)
+        botao = self.esperar(encontrar, 5)
         self.driver.execute_script("arguments[0].scrollIntoView({block:'center', inline:'nearest'});", botao)
         def acessivel(driver):
             return driver.execute_script(r"""
@@ -784,7 +784,7 @@ class App:
         botao.click()
 
     def verificar_formulario_sem_salvar(self, contato):
-        self.definir_etapa("Salvar ausente: conferindo nome, telefone, país e validação do formulário...")
+        self.definir_etapa("Conferindo nome, telefone, país e validação antes de procurar Salvar...")
         campo = self.esperar(self.campo_nome)
         painel = self.painel_formulario(campo)
         if not painel:
@@ -900,34 +900,28 @@ class App:
             raise RuntimeError("Não identifiquei o painel Novo contato. Cadastro bloqueado; veja o diagnóstico.")
         self.conferir_telefone_formulario(painel, numero)
         campo = self.digitar_nome(nome)
+        campo = self.verificar_formulario_sem_salvar(contato)
         try:
             self.confirmar_cadastro(campo)
         except RuntimeError as erro:
-            if not isinstance(erro.__cause__, TimeoutException):
+            # No extra field-check or second wait after the five-second deadline.
+            # Recovery is only for locating Save; an uncertain click is not retried.
+            if not isinstance(erro.__cause__, TimeoutException) or _reabertura:
                 raise
-            # Inspect and correct the current form before discarding its state.
-            # A retry is allowed only after a timeout locating Save, never a click.
-            campo = self.verificar_formulario_sem_salvar(contato)
-            self.definir_etapa("4/5: procurando o botão de salvar após conferir os campos...")
-            try:
-                self.confirmar_cadastro(campo)
-            except RuntimeError as revisao:
-                if not isinstance(revisao.__cause__, TimeoutException) or _reabertura:
-                    raise
-                self.log("Salvar continua ausente após conferir os campos. Reabrindo o formulário UMA VEZ.")
-                self.definir_etapa("Recuperando o formulário sem botão Salvar...")
-                self.conferir_parada()
-                self.driver.get("https://web.whatsapp.com/send?" + urlencode({"phone": numero}))
-                self.esperar(self.conversa_ou_recusa, 90)
-                estado, adicionar = self.detectar_estado_contato()
-                if estado == "existente":
-                    self.cadastro_confirmado = numero
-                    self.fechar_sobreposicoes()
-                    self.log("Cadastro confirmado durante a recuperação. Próxima etapa: ENVIAR MENSAGEM.")
-                    return
-                self.conferir_parada()
-                adicionar.click()
-                return self.cadastrar(contato, _reabertura=True)
+            self.log("Salvar não apareceu em 5 segundos. Fechando e reabrindo Adicionar contato UMA VEZ.")
+            self.definir_etapa("Reabrindo Adicionar contato após limite de 5 segundos...")
+            self.conferir_parada()
+            self.driver.get("https://web.whatsapp.com/send?" + urlencode({"phone": numero}))
+            self.esperar(self.conversa_ou_recusa, 90)
+            estado, adicionar = self.detectar_estado_contato()
+            if estado == "existente":
+                self.cadastro_confirmado = numero
+                self.fechar_sobreposicoes()
+                self.log("Cadastro confirmado durante a recuperação. Próxima etapa: ENVIAR MENSAGEM.")
+                return
+            self.conferir_parada()
+            adicionar.click()
+            return self.cadastrar(contato, _reabertura=True)
         def fechado(driver):
             try:
                 return not campo.is_displayed()
