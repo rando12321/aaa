@@ -1,11 +1,31 @@
 import os
+import queue
 import shutil
-import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from playwright.sync_api import sync_playwright
-from app import WhatsApp
-from app import Contact
+from app import App, NumeroRecusado
+from dom_driver import DomDriver
+
+HTML = '''<!doctype html><meta charset="utf-8"><style>[hidden]{display:none!important}</style>
+<div id="side"><button aria-label="Menu" onclick="window.wrong=true">Menu lateral</button></div>
+<div id="main"><header><span title="Nome de perfil diferente">Nome de perfil diferente</span>
+<button aria-label="Menu" onclick="menu.hidden=false">Menu</button></header>
+<div id="messages"></div><footer><div role="textbox" contenteditable="true"></div>
+<button aria-label="Enviar" onclick="send()"><span data-icon="send"></span></button></footer></div>
+<div id="menu" role="menu" hidden><button id="action" onclick="menu.hidden=true;document.getElementById('form').hidden=false">Adicionar aos contatos</button></div>
+<form id="form" role="dialog" hidden onsubmit="return false"><h2>Novo contato</h2>
+<label>Nome <input aria-label="Nome"></label><label>Telefone <input type="tel" value="+55 93 98410-8321"></label>
+<button type="button" aria-label="Salvar" onclick="localStorage.saved='yes';form.hidden=true;document.getElementById('action').textContent='Editar contato'">Salvar</button></form>
+<script>
+if(localStorage.saved) action.textContent='Editar contato';
+document.addEventListener('keydown',e=>{if(e.key==='Escape') menu.hidden=true});
+function send(){const f=document.querySelector('footer [contenteditable]');
+ const row=document.createElement('div');row.dataset.id='out-'+Date.now();row.className='message-out';
+ const text=document.createElement('span');text.className='selectable-text';text.innerText=f.innerText;
+ row.append(text);messages.append(row);f.innerText='';window.sent=(window.sent||0)+1;}
+</script>'''
 
 
 class BrowserTests(unittest.TestCase):
@@ -20,41 +40,121 @@ class BrowserTests(unittest.TestCase):
         cls.driver.stop()
 
     def setUp(self):
-        self.page = self.browser.new_page()
-        self.page.set_default_timeout(300)
-        self.tmp = tempfile.TemporaryDirectory()
-        self.adapter = WhatsApp(self.tmp.name, threading.Event(), lambda text: None)
-        self.adapter.page = self.page
-        self.contact = Contact('5593984108321', 'Teste')
+        self.context = self.browser.new_context()
+        self.page = self.context.new_page()
+        self.page.set_default_timeout(2000)
+        self.app = App.__new__(App)
+        self.app.driver = DomDriver(self.page)
+        self.app.parar = threading.Event()
+        self.app.eventos = queue.Queue()
+        self.app.etapa = ''
+        self.app.cadastro_confirmado = None
+        self.app.envio_pendente = None
+        self.contact = {'phone': '5593984108321', 'name': 'Nome CSV'}
+        self.serve(HTML)
 
     def tearDown(self):
-        self.page.close()
-        self.tmp.cleanup()
+        self.context.close()
 
     def serve(self, html):
+        self.page.unroute('https://web.whatsapp.com/**')
         self.page.route('https://web.whatsapp.com/**', lambda route: route.fulfill(body=html, content_type='text/html; charset=utf-8'))
 
-    def test_refusal_dismissed_once(self):
+    def open(self):
+        self.page.goto('https://web.whatsapp.com/send?phone=5593984108321')
+
+    def test_full_registration_and_multiline_emoji_send(self):
+        self.assertTrue(self.app.abrir_e_detectar(self.contact['phone']))
+        self.app.cadastrar(self.contact)
+        self.assertEqual(self.app.cadastro_confirmado, self.contact['phone'])
+        message = 'Olá, Nome CSV! 😊\nSegunda linha'
+        self.app.enviar(self.contact, message)
+        self.assertEqual(self.page.evaluate('window.sent'), 1)
+        self.assertIn(message, self.app.mensagens_saida().values())
+        self.assertIsNone(self.page.evaluate('window.wrong'))
+
+    def test_existing_different_profile_name_skips(self):
+        self.open()
+        self.page.evaluate("localStorage.saved='yes'")
+        self.assertFalse(self.app.abrir_e_detectar(self.contact['phone']))
+        self.assertIsNone(self.page.evaluate('window.sent'))
+
+    def test_phone_mismatch_blocks_save(self):
+        self.serve(HTML.replace('+55 93 98410-8321', '+55 11 2345-6789'))
+        self.assertTrue(self.app.abrir_e_detectar(self.contact['phone']))
+        with self.assertRaisesRegex(RuntimeError, 'telefone do formulário'):
+            self.app.cadastrar(self.contact)
+        self.assertIsNone(self.page.evaluate('localStorage.saved'))
+
+    def test_no_phone_evidence_blocks_save(self):
+        self.serve(HTML.replace('+55 93 98410-8321', ''))
+        self.app.abrir_e_detectar(self.contact['phone'])
+        with self.assertRaisesRegex(RuntimeError, 'telefone do formulário'):
+            self.app.cadastrar(self.contact)
+
+    def test_refusal_dismissed(self):
         self.serve('<div role="dialog">O número de telefone é inválido<button onclick="this.parentElement.remove()">OK</button></div>')
-        self.assertEqual(self.adapter.process(self.contact, 'Olá'), 'refused')
+        with self.assertRaises(NumeroRecusado):
+            self.app.abrir_e_detectar(self.contact['phone'])
+        self.app.fechar_aviso_numero()
         self.assertEqual(self.page.get_by_role('dialog').count(), 0)
 
-    def test_existing_with_different_name_never_sends(self):
-        self.serve('''<div id="main"><header>Outro nome<button aria-label="Menu" onclick="document.querySelector('#edit').hidden=false">Menu</button></header>
-        <footer><div role="textbox" contenteditable="true"></div></footer></div><button id="edit" hidden>Editar contato</button>''')
-        self.assertEqual(self.adapter.process(self.contact, 'Olá'), 'existing')
-        self.assertEqual(self.page.locator('[contenteditable]').inner_text(), '')
+    def test_draft_blocks_send(self):
+        self.serve(HTML.replace('role="textbox" contenteditable="true"></div>', 'role="textbox" contenteditable="true">Rascunho</div>'))
+        self.app.cadastro_confirmado = self.contact['phone']
+        with self.assertRaisesRegex(RuntimeError, 'rascunho'):
+            self.app.enviar(self.contact, 'Olá')
+        self.assertIsNone(self.page.evaluate('window.sent'))
 
-    def test_mismatched_form_phone_blocks_before_save(self):
-        self.serve('''<div id="main"><header><button aria-label="Menu" onclick="document.querySelector('#add').hidden=false">Menu</button></header>
-        <footer><div role="textbox" contenteditable="true"></div></footer></div>
-        <button id="add" hidden onclick="document.querySelector('#form').hidden=false">Adicionar aos contatos</button>
-        <div id="form" hidden><input aria-label="Nome"><input aria-label="Telefone" value="551123456789"><button onclick="window.saved=true">Salvar</button></div>''')
-        with self.assertRaisesRegex(RuntimeError, 'diverge'):
-            self.adapter.process(self.contact, 'Olá')
-        self.assertIsNone(self.page.evaluate('window.saved'))
-        self.assertEqual(self.page.locator('[contenteditable]').inner_text(), '')
+    def test_unconfirmed_contact_cannot_send(self):
+        with self.assertRaisesRegex(RuntimeError, 'não confirmado'):
+            self.app.enviar(self.contact, 'Olá')
 
+    def test_empty_composer_does_not_confirm_send_or_retry(self):
+        self.serve(HTML.replace('onclick="send()"', 'onclick="document.querySelector(\'footer [contenteditable]\').innerText=\'\';window.attempts=(window.attempts||0)+1"'))
+        self.app.cadastro_confirmado = self.contact['phone']
+        original = self.app.esperar
+        self.app.esperar = lambda fn, segundos=30: original(fn, min(segundos, 1))
+        with self.assertRaisesRegex(RuntimeError, 'ENVIO INCERTO'):
+            self.app.enviar(self.contact, 'Mensagem incerta')
+        self.assertEqual(self.page.evaluate('window.attempts'), 1)
+        with self.assertRaisesRegex(RuntimeError, 'envio incerto'):
+            self.app.enviar(self.contact, 'Mensagem incerta')
+        self.assertEqual(self.page.evaluate('window.attempts'), 1)
 
-if __name__ == '__main__':
-    unittest.main()
+    def test_menu_icon_scoped_to_chat(self):
+        self.serve(HTML.replace('aria-label="Menu" onclick="menu.hidden=false">Menu', 'onclick="menu.hidden=false"><span data-icon="menu"></span>'))
+        self.assertTrue(self.app.abrir_e_detectar(self.contact['phone']))
+        self.assertIsNone(self.page.evaluate('window.wrong'))
+
+    def test_contact_info_fallback_detects_edit_pencil(self):
+        html = HTML.replace('id="action" onclick="menu.hidden=true;document.getElementById(\'form\').hidden=false">Adicionar aos contatos',
+            'id="action" onclick="menu.hidden=true;document.getElementById(\'info\').hidden=false">Dados do contato')
+        html += '''<aside id="info" data-testid="contact-info-drawer" hidden><h2>Dados do contato</h2>
+        <p>+55 93 98410-8321</p><button aria-label="Editar"><span data-icon="edit"></span></button>
+        <button aria-label="Fechar" onclick="this.parentElement.hidden=true">Fechar</button></aside>'''
+        self.serve(html)
+        self.assertFalse(self.app.abrir_e_detectar(self.contact['phone']))
+        self.assertFalse(self.page.locator('#info').is_visible())
+        self.assertIsNone(self.page.evaluate('window.sent'))
+
+    def test_bottom_check_save_does_not_click_phone_check(self):
+        html = HTML.replace('<form id="form"', '<form style="display:flex;flex-direction:column" id="form"')
+        html = html.replace('<button type="button" aria-label="Salvar"', '<button style="margin-top:180px" type="button"')
+        html = html.replace('>Salvar</button></form>', '><span data-icon="checkmark"></span></button></form>')
+        html = html.replace('</label>\n<button style=', '<button type="button" onclick="window.phoneCheck=true"><span data-icon="checkmark"></span></button></label>\n<button style=')
+        self.serve(html)
+        self.app.abrir_e_detectar(self.contact['phone'])
+        self.app.cadastrar(self.contact)
+        self.assertEqual(self.app.cadastro_confirmado, self.contact['phone'])
+        self.assertIsNone(self.page.evaluate('window.phoneCheck'))
+
+    def test_same_header_name_without_edit_does_not_confirm_save(self):
+        html = HTML.replace("localStorage.saved='yes';form.hidden=true;document.getElementById('action').textContent='Editar contato'", "form.hidden=true")
+        html = html.replace('Nome de perfil diferente', self.contact['name'])
+        self.serve(html)
+        self.app.abrir_e_detectar(self.contact['phone'])
+        with self.assertRaisesRegex(RuntimeError, 'cadastro não foi confirmado'):
+            self.app.cadastrar(self.contact)
+        self.assertIsNone(self.app.cadastro_confirmado)
+        self.assertIsNone(self.page.evaluate('window.sent'))

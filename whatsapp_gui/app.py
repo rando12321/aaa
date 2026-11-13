@@ -1,383 +1,1254 @@
-"""Aplicativo completo em um arquivo.
-
-Instalação: python -m pip install playwright==1.56.0
-Navegador: python -m playwright install chromium
-Execução: python app.py
-Requer Python 3.12+, Tkinter e desktop gráfico.
-Cadastro/envio reais ainda exigem validação com a interface autenticada.
+"""Versão baseada integralmente no último arquivo fornecido pelo usuário.
+Requer: pip install selenium==4.38.0
+Execute: python app.py
 """
-import csv
 import json
 import os
+import csv
 import queue
 import random
 import re
+import secrets
 import threading
-import time
 import tkinter as tk
-from dataclasses import dataclass
+import unicodedata
+
+from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, ttk
+from urllib.parse import urlencode
 
-from playwright.sync_api import sync_playwright
-
-
-@dataclass(frozen=True)
-class Contact:
-    phone: str
-    name: str
-
-
-def normalize_phone(value):
-    # Only strip whitespace and ordinary telephone punctuation; never discard letters.
-    number = re.sub(r'[\s()+.\-/]', '', value)
-    if not number.isascii() or not number.isdigit():
-        raise ValueError('telefone contém caracteres inválidos')
-    if len(number) in (10, 11):
-        number = '55' + number
-    elif len(number) not in (12, 13) or not number.startswith('55'):
-        raise ValueError('esperado número brasileiro nacional ou com 55 completo')
-    if number == '5511999999999':
-        return None
-    return number
+from selenium import webdriver
+from selenium.common.exceptions import (
+    StaleElementReferenceException,
+    TimeoutException,
+)
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
 
 
-def read_contacts(path):
-    contacts, errors, seen = [], [], set()
-    with Path(path).open(encoding='utf-8-sig', newline='') as stream:
-        sample = stream.read(8192)
-        stream.seek(0)
-        try:
-            dialect = csv.Sniffer().sniff(sample, delimiters=',;')
-        except csv.Error:
-            dialect = csv.excel
-        reader = csv.DictReader(stream, dialect=dialect)
-        if not {'phone', 'name'}.issubset(reader.fieldnames or []):
-            raise ValueError('CSV precisa das colunas phone e name')
-        for line, row in enumerate(reader, 2):
-            raw = (row.get('phone') or '').strip()
-            if not raw:
-                continue
-            try:
-                phone = normalize_phone(raw)
-            except ValueError as exc:
-                errors.append(f'Linha {line}: {exc}')
-                continue
-            if phone is None or phone in seen:
-                continue
-            seen.add(phone)
-            name = (row.get('name') or '').strip() or f'Contato {random.SystemRandom().randint(100000, 999999)}'
-            contacts.append(Contact(phone, name))
-    return contacts, errors
+IGNORADOS = {"11999999999", "5511999999999"}
+
+ADICIONAR = [
+    "Adicionar aos contatos",
+    "Adicionar a contatos",
+    "Adicionar aos contactos",
+    "Adicionar contato",
+    "Add to contacts",
+    "Add contact",
+]
+
+EDITAR = [
+    "Editar contato",
+    "Editar contacto",
+    "Edit contact",
+]
+
+CRIAR = [
+    "Criar contato",
+    "Criar novo contato",
+    "Novo contato",
+    "Create contact",
+    "Create new contact",
+    "New contact",
+]
+
+PAINEIS = (
+    '[role="dialog"], [role="alertdialog"], [role="alert"], '
+    '[data-animate-modal-popup="true"], '
+    '[data-testid="popup-contents"]'
+)
 
 
-def wait_seconds(base, rng=random):
-    if base < 0:
-        raise ValueError('tempo base não pode ser negativo')
-    return base + rng.randint(60, 180)
-
-
-class Stopped(Exception):
+class NumeroRecusado(Exception):
     pass
 
 
-class WhatsApp:
-    def __init__(self, root, stop, log, executable=None):
-        self.root, self.stop, self.log = Path(root), stop, log
-        self.executable = executable
-        self.stage = 'inicialização'
+def normalizar(texto):
+    texto = "".join(
+        c for c in unicodedata.normalize("NFKD", texto)
+        if not unicodedata.combining(c)
+    )
+    return " ".join(texto.lower().split())
 
-    def __enter__(self):
-        self.root.mkdir(parents=True, exist_ok=True)
-        self.driver = sync_playwright().start()
+
+def digitos(texto):
+    return re.sub(r"[^0-9]", "", texto)
+
+
+def numero_brasileiro(valor):
+    original = valor.strip()
+
+    if not re.fullmatch(r"\+?[0-9\s().-]+", original):
+        raise ValueError(
+            f"Telefone inválido: {valor}. "
+            "Use texto sem fórmulas ou notação científica."
+        )
+
+    numero = digitos(original)
+
+    # DDD + telefone: acrescenta 55 completo.
+    if len(numero) in (10, 11):
+        return "55" + numero
+
+    # Já contém o código brasileiro e está completo.
+    if len(numero) in (12, 13) and numero.startswith("55"):
+        return numero
+
+    raise ValueError(
+        f"Telefone brasileiro inválido: {valor}. "
+        "Informe DDD + telefone ou 55 + DDD + telefone."
+    )
+
+
+def literal(texto):
+    if "'" not in texto:
+        return "'" + texto + "'"
+
+    if '"' not in texto:
+        return '"' + texto + '"'
+
+    partes = ["'" + parte + "'" for parte in texto.split("'")]
+    return "concat(" + ', "\'", '.join(partes) + ")"
+
+
+def gerar_nome():
+    primeiro = secrets.choice(
+        ("Lucas", "Ana", "Marina", "Pedro", "Clara", "Rafael")
+    )
+    sobrenome = secrets.choice(
+        ("Silva", "Costa", "Lima", "Rocha", "Souza")
+    )
+    return f"{primeiro} {sobrenome} {secrets.token_hex(3).upper()}"
+
+
+def ler_csv(caminho):
+    contatos = []
+    vistos = set()
+    ignorados = 0
+
+    with open(caminho, encoding="utf-8-sig", newline="") as arquivo:
+        amostra = arquivo.read(4096)
+        arquivo.seek(0)
+
         try:
-            self.context = self.driver.chromium.launch_persistent_context(
-                str(self.root / 'profile'), headless=False,
-                executable_path=self.executable, viewport={'width': 1280, 'height': 900})
-            self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
-            self.page.set_default_timeout(1200)
-            self.page.goto('https://web.whatsapp.com/', wait_until='domcontentloaded')
-            self.log('Faça login pelo QR no Chrome. Aguardando lista de conversas (até 180s).')
-            self.until(lambda: self.page.locator('#pane-side').is_visible(), 180)
-            return self
-        except BaseException:
-            if hasattr(self, 'context'):
-                self.context.close()
-            self.driver.stop()
-            raise
+            formato = csv.Sniffer().sniff(
+                amostra, delimiters=",;"
+            )
+        except csv.Error:
+            formato = csv.excel
 
-    def __exit__(self, *args):
-        self.context.close()
-        self.driver.stop()
+        leitor = csv.DictReader(arquivo, dialect=formato)
+        leitor.fieldnames = [
+            coluna.strip().lower()
+            for coluna in (leitor.fieldnames or [])
+        ]
 
-    def until(self, predicate, timeout=30):
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            if self.stop.is_set():
-                raise Stopped()
-            result = predicate()
-            if result:
-                return result
-            self.stop.wait(.2)
-        raise TimeoutError(f'timeout na etapa: {self.stage}')
+        if not {"phone", "name"}.issubset(leitor.fieldnames):
+            raise ValueError(
+                "O CSV precisa das colunas phone e name."
+            )
 
-    def step(self, name):
-        self.stage = name
-        self.log(name)
+        for linha, registro in enumerate(leitor, 2):
+            original = (registro.get("phone") or "").strip()
+            nome = (registro.get("name") or "").strip()
 
-    def one(self, locator):
-        if locator.count() != 1 or not locator.is_visible():
-            raise RuntimeError(f'{self.stage}: elemento único visível não identificado')
-        return locator
+            if not original and not nome:
+                continue
 
-    def menu(self):
-        header = self.one(self.page.locator('#main header'))
-        self.one(header.get_by_role('button', name=re.compile(r'^(Menu|Mais opções|More options)$', re.I))).click()
+            if digitos(original) in IGNORADOS:
+                ignorados += 1
+                continue
 
-    def menu_entry(self, pattern):
-        return self.page.get_by_role('button', name=pattern).or_(self.page.get_by_role('menuitem', name=pattern))
+            try:
+                numero = numero_brasileiro(original)
+            except ValueError as erro:
+                raise ValueError(
+                    f"Linha {linha}: {erro}"
+                ) from erro
 
-    def contact_state(self):
-        self.menu()
-        edit = self.menu_entry(re.compile(r'^(Editar contato|Edit contact)$', re.I))
-        add = self.menu_entry(re.compile(r'^(Adicionar aos contatos|Add to contacts)$', re.I))
-        try:
-            self.until(lambda: edit.is_visible() or add.is_visible(), 5)
-            if edit.is_visible() and not add.is_visible():
-                return 'existing', None
-            if add.is_visible() and not edit.is_visible():
-                return 'new', add
-            raise RuntimeError('evidências de contato conflitantes')
-        except BaseException:
-            self.page.keyboard.press('Escape')
-            raise
+            if numero in IGNORADOS:
+                ignorados += 1
+                continue
 
-    def process(self, contact, message):
-        self.step('abrir destinatário e verificar resposta')
-        self.page.goto(f'https://web.whatsapp.com/send?phone={contact.phone}', wait_until='domcontentloaded')
-        refused = self.page.get_by_role('dialog').filter(has_text=re.compile(
-            r'(número.*(inválido|não.*WhatsApp)|phone number.*(invalid|not on WhatsApp))', re.I))
-        composer = self.page.locator('#main footer [contenteditable="true"][role="textbox"]')
-        self.until(lambda: refused.is_visible() or composer.is_visible(), 60)
-        if refused.is_visible():
-            self.log('Aviso: ' + refused.inner_text())
-            self.one(refused.get_by_role('button', name=re.compile(r'^OK$', re.I))).click()
-            self.until(lambda: not refused.is_visible(), 5)
-            return 'refused'
-        self.step('detectar contato salvo pelo menu da conversa')
-        state, add = self.contact_state()
-        if state == 'existing':
-            self.page.keyboard.press('Escape')
-            return 'existing'
-        self.step('abrir formulário de novo contato')
-        self.one(add).click()
-        create = self.menu_entry(re.compile(r'^(Criar contato|Create new contact|Create contact)$', re.I))
-        name = self.page.get_by_role('textbox', name=re.compile(r'^(Nome|First name|Name)$', re.I))
-        self.until(lambda: name.is_visible() or create.is_visible(), 10)
-        if create.is_visible():
-            self.one(create).click()
-        self.until(lambda: name.is_visible(), 10)
-        self.step('conferir telefone do formulário e preencher nome')
-        phone = self.one(self.page.get_by_role('textbox', name=re.compile(r'^(Telefone|Número de telefone|Phone|Phone number)$', re.I)))
-        if re.sub(r'\D', '', phone.input_value()) != contact.phone:
-            raise RuntimeError('telefone do formulário diverge do destinatário')
-        self.one(name).fill(contact.name)
-        self.step('salvar contato pelo botão identificado por nome acessível')
-        # Never click a generic checkmark: it could be the phone verification icon.
-        save = self.page.get_by_role('button', name=re.compile(r'^(Salvar|Save|Salvar contato|Save contact)$', re.I))
-        self.one(save).click()
-        self.until(lambda: not name.is_visible(), 15)
-        self.step('confirmar cadastro salvo pelo menu Editar contato')
-        state, _ = self.contact_state()
-        self.page.keyboard.press('Escape')
-        if state != 'existing':
-            raise RuntimeError('cadastro não confirmado; mensagem bloqueada')
-        self.step('confirmar destinatário novamente')
-        # Re-open exactly the requested number after the contact form was closed.
-        self.page.goto(f'https://web.whatsapp.com/send?phone={contact.phone}', wait_until='domcontentloaded')
-        self.until(lambda: composer.is_visible(), 60)
-        self.step('preparar mensagem sem misturar rascunho')
-        field = self.one(composer)
-        if field.inner_text().strip():
-            raise RuntimeError('há rascunho existente; mensagem bloqueada')
-        outgoing = self.page.locator('#main .message-out')
-        previous_ids = set(outgoing.evaluate_all('(els) => els.map(e => e.closest("[data-id]")?.getAttribute("data-id")).filter(Boolean)'))
-        rendered = message.replace('{name}', contact.name)
-        field.fill(rendered)
-        if field.inner_text().replace('\r\n', '\n') != rendered.replace('\r\n', '\n'):
-            raise RuntimeError('rascunho não corresponde à mensagem; envio bloqueado')
-        self.step('envio solicitado; não repetir se confirmação falhar')
-        if self.stop.is_set():
-            raise Stopped()
-        field.press('Enter')
-        def new_bubble():
-            for bubble in outgoing.all():
-                identifier = bubble.evaluate('(e) => e.closest("[data-id]")?.getAttribute("data-id")')
-                if identifier and identifier not in previous_ids:
-                    text = bubble.locator('.selectable-text')
-                    if text.count() and text.first.inner_text().strip() == rendered.strip():
-                        return True
-            return False
-        try:
-            self.until(new_bubble, 20)
-        except Exception as exc:
-            raise RuntimeError('ENVIO INCERTO: não repetir automaticamente; confira a conversa') from exc
-        return 'sent'
+            if numero in vistos:
+                continue
 
-    def screenshot(self, phone):
-        target = self.root / f'erro-{phone}-{time.time_ns()}.png'
-        self.page.screenshot(path=str(target), full_page=True)
-        return target
+            vistos.add(numero)
+            contatos.append({
+                "original": original,
+                "phone": numero,
+                "name": nome or gerar_nome(),
+                "nome_gerado": not nome,
+            })
 
+    if not contatos:
+        raise ValueError(
+            "Nenhum contato disponível após remover "
+            "números ignorados e duplicados."
+        )
 
-ROOT = Path(__file__).resolve().parent / '.local'
+    nomes = [contato["name"] for contato in contatos]
+
+    if len(nomes) != len(set(nomes)):
+        raise ValueError(
+            "Use nomes diferentes para cada contato."
+        )
+
+    return contatos, ignorados
 
 
 class App:
-    def __init__(self, window):
-        self.window = window
-        self.events = queue.Queue()
-        self.stop = threading.Event()
-        self.running = False
-        window.title('Contatos • WhatsApp Web')
-        window.geometry('850x680')
-        frame = ttk.Frame(window, padding=18)
-        frame.pack(fill='both', expand=True)
-        ttk.Label(frame, text='Cadastro e mensagens', font=('', 20, 'bold')).pack(anchor='w')
-        ttk.Label(frame, text='CSV: phone,name • Login por QR • Interface em português ou inglês').pack(anchor='w', pady=8)
-        self.csv = tk.StringVar()
-        row = ttk.Frame(frame)
-        row.pack(fill='x')
-        ttk.Entry(row, textvariable=self.csv).pack(side='left', fill='x', expand=True)
-        ttk.Button(row, text='Escolher CSV', command=self.choose).pack(side='right')
-        ttk.Label(frame, text='Mensagem ({name} será substituído pelo nome cadastrado):').pack(anchor='w', pady=(15, 5))
-        self.message = scrolledtext.ScrolledText(frame, height=6)
-        self.message.pack(fill='x')
-        self.message.insert('1.0', 'Olá, {name}!')
-        row = ttk.Frame(frame)
-        row.pack(fill='x', pady=12)
-        ttk.Label(row, text='Espera base (segundos) + sorteio de 60 a 180:').pack(side='left')
-        self.base = tk.StringVar(value='30')
-        ttk.Entry(row, textvariable=self.base, width=8).pack(side='left', padx=8)
-        self.start = ttk.Button(row, text='Iniciar', command=self.begin)
-        self.start.pack(side='left', padx=8)
-        ttk.Button(row, text='Parar', command=self.stop.set).pack(side='left')
-        self.progress = tk.StringVar(value='Aguardando CSV')
-        ttk.Label(frame, textvariable=self.progress).pack(anchor='w')
-        self.logs = scrolledtext.ScrolledText(frame, height=16, state='disabled')
-        self.logs.pack(fill='both', expand=True, pady=8)
-        window.protocol('WM_DELETE_WINDOW', self.close)
-        window.after(100, self.poll)
+    def __init__(self, root):
+        self.root = root
+        self.driver = None
+        self.contatos = []
+        self.eventos = queue.Queue()
+        self.parar = threading.Event()
+        self.ocupado = False
+        self.etapa = ""
+        self.numero_atual = None
+        self.cadastro_confirmado = None
+        self.envio_pendente = None
 
-    def choose(self):
-        path = filedialog.askopenfilename(filetypes=[('CSV', '*.csv')])
-        if path:
-            self.csv.set(path)
+        root.title("WhatsApp — cadastrar e enviar")
+        root.geometry("960x730")
 
-    def log(self, text):
-        self.events.put(('log', text))
+        barra = ttk.Frame(root)
+        barra.pack(fill="x", padx=12, pady=12)
 
-    def begin(self):
-        if self.running:
-            return
+        self.botoes = []
+
+        for titulo, comando in (
+            ("Carregar CSV", self.carregar),
+            ("Chrome / QR", self.chrome),
+            ("Iniciar", self.iniciar),
+        ):
+            botao = ttk.Button(
+                barra, text=titulo, command=comando
+            )
+            botao.pack(side="left", padx=4)
+            self.botoes.append(botao)
+
+        ttk.Button(
+            barra, text="Parar", command=self.parar.set
+        ).pack(side="left", padx=4)
+
+        self.status = tk.StringVar(
+            value="Carregue o CSV e conecte o WhatsApp."
+        )
+
+        ttk.Label(
+            root, textvariable=self.status
+        ).pack(anchor="w", padx=12)
+
+        ttk.Label(
+            root,
+            text=(
+                "Brasil +55. Contatos existentes são pulados. "
+                "Números recusados passam ao próximo sem espera."
+            ),
+        ).pack(anchor="w", padx=12, pady=(8, 0))
+
+        ttk.Label(
+            root,
+            text="Mensagem — use {name} para inserir o nome:",
+        ).pack(anchor="w", padx=12, pady=(12, 4))
+
+        self.mensagem = tk.Text(
+            root, height=7, wrap="word"
+        )
+        self.mensagem.pack(fill="x", padx=12)
+        self.mensagem.insert(
+            "1.0", "Olá, {name}! Tudo bem?"
+        )
+
+        linha = ttk.Frame(root)
+        linha.pack(fill="x", padx=12, pady=10)
+
+        ttk.Label(
+            linha, text="Tempo base em segundos:"
+        ).pack(side="left")
+
+        self.intervalo = tk.StringVar(value="15")
+        ttk.Entry(
+            linha,
+            textvariable=self.intervalo,
+            width=8,
+        ).pack(side="left", padx=8)
+
+        ttk.Label(
+            linha,
+            text="+ 60 a 180 segundos aleatórios",
+        ).pack(side="left")
+
+        self.registro = tk.Text(
+            root, state="disabled", wrap="word"
+        )
+        self.registro.pack(
+            fill="both", expand=True, padx=12, pady=10
+        )
+
+        root.after(100, self.atualizar)
+        root.protocol("WM_DELETE_WINDOW", self.fechar)
+
+    def log(self, texto):
+        self.eventos.put(("log", texto))
+
+    def definir_etapa(self, texto):
+        self.etapa = texto
+        self.log(texto)
+
+    def conferir_parada(self):
+        if self.parar.is_set():
+            raise InterruptedError()
+
+    def esperar(self, funcao, segundos=30):
+        def verificar(driver):
+            self.conferir_parada()
+
+            try:
+                return funcao(driver)
+            except StaleElementReferenceException:
+                return False
+
         try:
-            contacts, errors = read_contacts(self.csv.get())
-            base = int(self.base.get())
-            if base < 0 or not contacts:
-                raise ValueError('Informe tempo não negativo e CSV com contatos válidos')
-            message = self.message.get('1.0', 'end-1c')
-            if not message.strip():
-                raise ValueError('Mensagem vazia')
-        except Exception as exc:
-            messagebox.showerror('Dados inválidos', str(exc))
+            return WebDriverWait(
+                self.driver, segundos
+            ).until(verificar)
+
+        except TimeoutException as erro:
+            raise RuntimeError(
+                "Tempo esgotado na etapa: " + self.etapa
+            ) from erro
+
+    def visiveis(self, seletor, base=None):
+        base = base if base is not None else self.driver
+
+        return [
+            elemento
+            for elemento in base.find_elements(
+                By.CSS_SELECTOR, seletor
+            )
+            if elemento.is_displayed()
+        ]
+
+    def executar(self, tarefa):
+        if self.ocupado:
             return
-        for error in errors:
-            self.log(error)
-        self.running = True
-        self.start.configure(state='disabled')
-        self.stop.clear()
-        threading.Thread(target=self.run, args=(contacts, base, message), daemon=True).start()
 
-    def run(self, contacts, base, message):
-        ROOT.mkdir(parents=True, exist_ok=True)
-        journal = ROOT / 'historico.jsonl'
+        self.ocupado = True
+        self.parar.clear()
+
+        for botao in self.botoes:
+            botao.configure(state="disabled")
+
+        def trabalho():
+            try:
+                tarefa()
+
+            except InterruptedError:
+                self.log("Interrompido pelo usuário.")
+
+            except Exception as erro:
+                self.log(
+                    f"ERRO: {type(erro).__name__}: {erro}"
+                )
+                self.diagnostico()
+                self.log(
+                    "Lote interrompido. "
+                    "Não haverá repetição automática."
+                )
+
+            finally:
+                self.eventos.put(("fim", None))
+
+        threading.Thread(
+            target=trabalho, daemon=True
+        ).start()
+
+    def carregar(self):
+        caminho = filedialog.askopenfilename(
+            filetypes=[("Arquivo CSV", "*.csv")]
+        )
+
+        if not caminho:
+            return
+
         try:
-            # Started numbers require manual review on later runs: no accidental retry.
-            seen = set()
-            if journal.exists():
-                for line in journal.read_text(encoding='utf-8').splitlines():
-                    seen.add(json.loads(line)['phone'])
-            with journal.open('a', encoding='utf-8') as output:
-                def record(phone, status):
-                    output.write(json.dumps({'phone': phone, 'status': status, 'time': time.time()}, ensure_ascii=False) + '\n')
-                    output.flush()
-                    os.fsync(output.fileno())
-                with WhatsApp(ROOT, self.stop, self.log, os.environ.get('WHATSAPP_CHROME')) as browser:
-                    for i, contact in enumerate(contacts):
-                        if self.stop.is_set():
-                            break
-                        self.events.put(('progress', f'{i + 1}/{len(contacts)} — {contact.name} — {contact.phone}'))
-                        if contact.phone in seen:
-                            self.log('SKIP: já registrado; revise o histórico antes de nova tentativa')
-                            continue
-                        record(contact.phone, 'started')
-                        try:
-                            outcome = browser.process(contact, message)
-                            record(contact.phone, outcome)
-                            self.log({'sent': 'ENVIADO: nova mensagem observada na conversa; entrega não confirmada',
-                                      'existing': 'SKIP: contato existente', 'refused': 'SKIP: número recusado'}[outcome])
-                        except Stopped:
-                            record(contact.phone, 'stopped_review_required')
-                            break
-                        except Exception as exc:
-                            record(contact.phone, 'error_review_required')
-                            self.log(f'ERRO [{browser.stage}]: {exc}')
-                            try:
-                                self.log(f'Captura: {browser.screenshot(contact.phone)}')
-                            except Exception as capture_error:
-                                self.log(f'Falha ao capturar: {capture_error}')
-                            # Stop on unknown UI or uncertain send; do not compound errors.
-                            break
-                        remaining = any(c.phone not in seen for c in contacts[i + 1:])
-                        if remaining and outcome in ('sent', 'existing'):
-                            delay = wait_seconds(base)
-                            self.log(f'Espera: {delay}s (Parar interrompe)')
-                            if self.stop.wait(delay):
-                                break
-        except Stopped:
-            self.log('Interrompido')
-        except Exception as exc:
-            self.log(f'ERRO: {exc}')
-        finally:
-            self.events.put(('done', 'Processamento encerrado. Consulte o registro.'))
+            contatos, ignorados = ler_csv(caminho)
+        except Exception as erro:
+            messagebox.showerror("CSV", str(erro))
+            return
 
-    def poll(self):
+        self.contatos = contatos
+        self.status.set(
+            f"{len(contatos)} contatos únicos carregados."
+        )
+
+        self.log(
+            f"{ignorados} ocorrência(s) da lista "
+            "de exclusão ignorada(s)."
+        )
+
+        for contato in contatos:
+            self.log(
+                f"CSV: {contato['original']} "
+                f"→ +{contato['phone']} "
+                f"— {contato['name']}"
+            )
+
+    def chrome(self):
+        if self.envio_pendente:
+            if not messagebox.askyesno("Envio incerto", "Confira manualmente a conversa antes de continuar. Você já verificou o envio anterior?"):
+                return
+            self.envio_pendente = None
+        def abrir():
+            if self.driver is None:
+                opcoes = webdriver.ChromeOptions()
+                perfil = (
+                    Path.home()
+                    / ".whatsapp_csv_sender"
+                    / "chrome"
+                )
+
+                opcoes.add_argument(
+                    f"--user-data-dir={perfil}"
+                )
+                if os.environ.get("WHATSAPP_CHROME"):
+                    opcoes.binary_location = os.environ["WHATSAPP_CHROME"]
+                servico = Service(executable_path=os.environ["WHATSAPP_CHROMEDRIVER"]) if os.environ.get("WHATSAPP_CHROMEDRIVER") else Service()
+                self.driver = webdriver.Chrome(service=servico, options=opcoes)
+
+            self.driver.get("https://web.whatsapp.com/")
+            self.log(
+                "Escaneie o QR e espere as conversas carregarem."
+            )
+
+        self.executar(abrir)
+
+    def campo_mensagem(self, driver):
+        # Never accept a search field or a textbox belonging to another panel.
+        campos = self.visiveis(
+            '#main footer [contenteditable="true"][role="textbox"], '
+            '#main footer [contenteditable="true"][data-lexical-editor="true"]'
+        )
+        campos = [c for c in campos if c.is_enabled()]
+        return campos[0] if len(campos) == 1 else False
+
+    def cabecalho(self):
+        elementos = self.visiveis('#main header')
+        return elementos[0] if len(elementos) == 1 else None
+
+    def nome_confirmado(self, nome):
+        cabecalho = self.cabecalho()
+
+        if cabecalho is None:
+            return False
+
+        textos = cabecalho.text.splitlines()
+        textos += [
+            elemento.get_attribute("title") or ""
+            for elemento in cabecalho.find_elements(
+                By.CSS_SELECTOR, "[title]"
+            )
+        ]
+
+        esperado = " ".join(nome.split())
+
+        return esperado in [
+            " ".join(texto.split())
+            for texto in textos
+        ]
+
+    def buscar_texto(self, nomes, base=None):
+        base = base if base is not None else self.driver
+
+        for nome in nomes:
+            condicao = (
+                f"normalize-space(.)={literal(nome)}"
+            )
+            xpath = (
+                f".//*[{condicao} "
+                f"and not(.//*[{condicao}])]"
+            )
+
+            for elemento in base.find_elements(
+                By.XPATH, xpath
+            ):
+                if (
+                    elemento.is_displayed()
+                    and elemento.is_enabled()
+                ):
+                    return elemento
+
+        return False
+
+    def encontrar_aviso_numero(self):
+        avisos = (
+            "numero de telefone invalido",
+            "numero compartilhado por url e invalido",
+            "phone number shared via url is invalid",
+            "phone number is invalid",
+            "nao esta no whatsapp",
+            "nao esta registrado no whatsapp",
+            "is not on whatsapp",
+            "isn't on whatsapp",
+            "not registered on whatsapp",
+        )
+
+        for painel in self.visiveis(PAINEIS):
+            texto = normalizar(painel.text)
+
+            if any(aviso in texto for aviso in avisos) or re.search(
+                r"(?:numero.*(?:invalido|nao (?:esta |e )?(?:registrado )?no whatsapp)|phone number.*(?:invalid|not (?:registered )?on whatsapp))", texto
+            ):
+                return painel
+
+        return None
+
+    def fechar_aviso_numero(self):
+        self.definir_etapa(
+            "Fechando o aviso do WhatsApp..."
+        )
+
+        def localizar(driver):
+            painel = self.encontrar_aviso_numero()
+
+            if painel is None:
+                return "fechado", None
+
+            for botao in painel.find_elements(
+                By.CSS_SELECTOR,
+                'button, [role="button"]',
+            ):
+                if (
+                    not botao.is_displayed()
+                    or not botao.is_enabled()
+                ):
+                    continue
+
+                rotulo = normalizar(
+                    botao.text
+                    or botao.get_attribute("aria-label")
+                    or ""
+                )
+
+                if rotulo == "ok":
+                    return "botao", botao
+
+            elemento = self.buscar_texto(
+                ["OK", "Ok"], painel
+            )
+
+            if elemento:
+                botao = driver.execute_script(
+                    r"""
+                    return arguments[0].closest(
+                        'button, [role="button"]'
+                    ) || arguments[0];
+                    """,
+                    elemento,
+                )
+                return "botao", botao
+
+            return False
+
+        estado, botao = self.esperar(localizar, 15)
+
+        if estado == "botao":
+            self.conferir_parada()
+            botao.click()
+
+        self.esperar(
+            lambda driver:
+            self.encontrar_aviso_numero() is None,
+            15,
+        )
+
+        self.log("Aviso fechado.")
+
+    def localizar_menu(self, driver, base=None):
+        base = base if base is not None else self.cabecalho()
+        if base is None:
+            return False
+        return driver.execute_script(
+            r"""
+            const root = arguments[0];
+            const visible = e => e.getClientRects().length
+                && getComputedStyle(e).visibility !== 'hidden';
+            const found = new Set();
+            for (const e of root.querySelectorAll(
+                'button, [role="button"], [data-icon], [aria-label], [title]'
+            )) {
+                if (!visible(e)) continue;
+                const label = (e.getAttribute('aria-label') || e.getAttribute('title') || '').trim();
+                const icon = e.getAttribute('data-icon') || '';
+                if (!/^(menu|mais op[cç][oõ]es|more options)$/i.test(label)
+                    && !/^(menu|more-vertical|more_vert|overflow-menu)$/.test(icon)) continue;
+                const button = e.closest('button, [role="button"], [tabindex="0"]');
+                if (button && root.contains(button) && visible(button)
+                    && !button.disabled && button.getAttribute('aria-disabled') !== 'true') found.add(button);
+            }
+            return found.size === 1 ? [...found][0] : null;
+            """, base,
+        ) or False
+
+    def abrir_e_detectar(self, numero):
+        self.numero_atual = numero
+        self.cadastro_confirmado = None
+        self.definir_etapa(f"1/5: abrindo e verificando +{numero}...")
+        self.driver.get("https://web.whatsapp.com/send?" + urlencode({"phone": numero}))
+        self.esperar(self.conversa_ou_recusa, 90)
+        self.definir_etapa("2/5: verificando se o contato está salvo...")
+        estado, elemento = self.detectar_estado_contato()
+        if estado == "existente":
+            self.log(f"SKIP: +{numero} já está nos contatos. Cadastro e envio ignorados.")
+            self.fechar_sobreposicoes()
+            return False
+        self.conferir_parada()
+        elemento.click()
+        return True
+
+    def campo_nome(self, driver):
+        aceitos = {
+            "nome",
+            "primeiro nome",
+            "name",
+            "first name",
+            "given name",
+            "given-name",
+            "nome completo",
+            "full name",
+        }
+
+        seletor = (
+            'input:not([type="hidden"])'
+            ':not([type="checkbox"])'
+            ':not([type="radio"])'
+            ':not([type="search"]), '
+            '[contenteditable="true"][role="textbox"]'
+        )
+
+        for campo in self.visiveis(seletor):
+            if not campo.is_enabled():
+                continue
+
+            if driver.execute_script(
+                "return !!arguments[0].closest('footer, #side');",
+                campo,
+            ):
+                continue
+
+            rotulos = [
+                campo.get_attribute(atributo) or ""
+                for atributo in (
+                    "aria-label",
+                    "placeholder",
+                    "name",
+                    "autocomplete",
+                )
+            ]
+
+            rotulos += driver.execute_script(
+                r"""
+                return Array.from(arguments[0].labels || [])
+                    .map(label => label.innerText);
+                """,
+                campo,
+            )
+
+            for referencia in (
+                campo.get_attribute("aria-labelledby") or ""
+            ).split():
+                rotulos += [
+                    elemento.text
+                    for elemento in driver.find_elements(
+                        By.ID, referencia
+                    )
+                ]
+
+            for rotulo in rotulos:
+                texto = re.sub(
+                    r"[\s:*]+$", "", normalizar(rotulo)
+                )
+
+                if texto in aceitos:
+                    return campo
+
+        xpath = (
+            "//*[normalize-space(.)='Nome' "
+            "and not(.//*[normalize-space(.)='Nome'])]"
+        )
+
+        for rotulo in driver.find_elements(By.XPATH, xpath):
+            if not rotulo.is_displayed():
+                continue
+
+            campo = driver.execute_script(
+                r"""
+                let parent = arguments[0].parentElement;
+
+                for (
+                    let level = 0;
+                    parent && level < 6;
+                    level++, parent = parent.parentElement
+                ) {
+                    const fields = Array.from(
+                        parent.querySelectorAll(
+                            'input:not([type=hidden])'
+                            + ':not([type=checkbox])'
+                            + ':not([type=radio]), '
+                            + '[contenteditable=true]'
+                        )
+                    ).filter(e =>
+                        e.getClientRects().length
+                        && !e.disabled
+                        && !e.closest('footer, #side')
+                    );
+
+                    if (fields.length === 1) return fields[0];
+                    if (fields.length > 1) return null;
+                }
+
+                return null;
+                """,
+                rotulo,
+            )
+
+            if campo:
+                return campo
+
+        return False
+
+    def confirmar_cadastro(self, campo):
+        self.definir_etapa("4/5: procurando o botão de salvar no formulário...")
+        def encontrar(driver):
+            painel = self.painel_formulario(campo)
+            if not painel:
+                return False
+            return driver.execute_script(
+                r"""
+                const panel = arguments[0], field = arguments[1];
+                const visible = e => e.getClientRects().length
+                    && getComputedStyle(e).visibility !== 'hidden';
+                const norm = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+                const buttons = [...panel.querySelectorAll('button, [role="button"]')]
+                    .filter(e => visible(e) && !e.disabled && e.getAttribute('aria-disabled') !== 'true');
+                const named = buttons.filter(b => [b.innerText, b.getAttribute('aria-label'), b.title]
+                    .some(t => /^(salvar|guardar|save|salvar contato|save contact|concluir|done)$/.test(norm(t || ''))));
+                if (named.length === 1) return named[0];
+                if (named.length > 1) return null;
+                // Icon-only save: require the unique bottom action in this form.
+                // A phone validation check is inside its field row, never an action.
+                const f = field.getBoundingClientRect();
+                const checks = buttons.filter(b => {
+                    const r = b.getBoundingClientRect();
+                    const icon = [b, ...b.querySelectorAll('[data-icon], [aria-label]')]
+                        .some(e => /^(check|checkmark|tick|done|save)$/.test(
+                            (e.getAttribute('data-icon') || e.getAttribute('aria-label') || '').toLowerCase()));
+                    const row = b.closest('label, [data-testid*="phone"], [data-testid*="input"]');
+                    return icon && !row && r.top > f.bottom && r.top >= panel.getBoundingClientRect().top
+                        && !buttons.some(other => other !== b && other.getBoundingClientRect().top > r.bottom);
+                });
+                return checks.length === 1 ? checks[0] : null;
+                """, painel, campo,
+            ) or False
+        botao = self.esperar(encontrar)
+        self.conferir_parada()
+        botao.click()
+
+    def cadastrar(self, contato):
+        nome, numero = contato["name"], contato["phone"]
+        self.definir_etapa("3/5: abrindo o formulário e preenchendo Nome...")
+        def formulario(driver):
+            campo = self.campo_nome(driver)
+            if campo:
+                return "campo", campo
+            criar = self.acao_visivel(CRIAR)
+            return ("criar", criar) if criar else False
+        tipo, campo = self.esperar(formulario)
+        if tipo == "criar":
+            self.conferir_parada()
+            campo.click()
+            campo = self.esperar(self.campo_nome)
+        self.definir_etapa("Conferindo telefone do formulário...")
+        painel = self.painel_formulario(campo)
+        if not painel or not self.telefone_no_painel(painel, numero):
+            raise RuntimeError("Não foi possível confirmar o telefone do formulário. Cadastro bloqueado.")
+        self.conferir_parada()
+        campo.click()
+        modificador = Keys.COMMAND if self.driver.capabilities.get('platformName', '').lower() == 'mac' else Keys.CONTROL
+        campo.send_keys(modificador, "a")
+        campo.send_keys(Keys.BACKSPACE)
+        campo.send_keys(nome)
+        atributo = "value" if campo.tag_name.lower() == "input" else "textContent"
+        if (campo.get_attribute(atributo) or "").strip() != nome:
+            raise RuntimeError("O campo Nome não recebeu o texto esperado.")
+        self.confirmar_cadastro(campo)
+        def fechado(driver):
+            try:
+                return not campo.is_displayed()
+            except StaleElementReferenceException:
+                return True
+        self.esperar(fechado)
+        self.definir_etapa("Confirmando cadastro salvo pela opção Editar contato...")
+        self.fechar_sobreposicoes()
+        estado, _ = self.detectar_estado_contato()
+        self.fechar_sobreposicoes()
+        if estado != "existente":
+            raise RuntimeError("O formulário fechou, mas o cadastro não foi confirmado. Envio bloqueado.")
+        self.cadastro_confirmado = numero
+        self.log("Cadastro confirmado pela interface: Editar contato disponível.")
+
+    def enviar(self, contato, texto):
+        numero = contato["phone"]
+        if getattr(self, "cadastro_confirmado", None) != numero:
+            raise RuntimeError("Cadastro deste destinatário não confirmado. Envio bloqueado.")
+        if getattr(self, "envio_pendente", None):
+            raise RuntimeError("Há um envio incerto nesta sessão. Confira a conversa e reconecte antes de tentar novamente.")
+        self.definir_etapa("5/5: reabrindo o número exato antes de enviar...")
+        self.driver.get("https://web.whatsapp.com/send?" + urlencode({"phone": numero}))
+        self.esperar(self.conversa_ou_recusa, 90)
+        campo = self.esperar(self.campo_mensagem)
+        if (campo.get_attribute("textContent") or "").strip():
+            raise RuntimeError("Existe um rascunho na conversa. Limpe-o antes de continuar.")
+        texto = texto.replace("\r\n", "\n").replace("\r", "\n")
+        anteriores = self.mensagens_saida()
+        self.definir_etapa("Preenchendo e conferindo a mensagem completa...")
+        # insertText supports emoji/non-BMP text, unlike ChromeDriver send_keys.
+        campo.click()
+        self.driver.execute_cdp_cmd('Input.insertText', {'text': texto})
+        def conferir_texto(driver):
+            atual = self.campo_mensagem(driver)
+            return atual and self.texto_editor(atual) == texto
+        self.esperar(conferir_texto, 10)
+        self.conferir_parada()
+        self.definir_etapa("Enviando uma única vez e aguardando nova mensagem de saída...")
+        self.envio_pendente = numero
+        try:
+            # Prefer the explicit send action; only use Enter when no action exists.
+            botoes = self.driver.execute_script(
+                r"""
+                const footer = arguments[0].closest('footer');
+                const found = new Set();
+                for (const e of footer.querySelectorAll('button, [role="button"], [data-icon]')) {
+                    if (!e.getClientRects().length) continue;
+                    const label = e.getAttribute('aria-label') || '';
+                    if (!/^(enviar|send)$/i.test(label) && e.getAttribute('data-icon') !== 'send') continue;
+                    const b = e.closest('button, [role="button"]');
+                    if (b && !b.disabled && b.getAttribute('aria-disabled') !== 'true') found.add(b);
+                }
+                return [...found];
+                """, campo,
+            )
+            if len(botoes) > 1:
+                self.envio_pendente = None
+                raise RuntimeError("Mais de um botão de envio encontrado; envio bloqueado.")
+            if botoes:
+                botoes[0].click()
+            else:
+                campo.send_keys(Keys.ENTER)
+            def nova_mensagem(driver):
+                mensagens = self.mensagens_saida()
+                return any(chave not in anteriores and valor == texto for chave, valor in mensagens.items())
+            self.esperar(nova_mensagem, 30)
+        except Exception as erro:
+            raise RuntimeError("ENVIO INCERTO: não repetir automaticamente. Confira a conversa; o lote foi interrompido.") from erro
+        self.envio_pendente = None
+        self.log("Nova mensagem de saída confirmada na conversa. Entrega ao destinatário não confirmada.")
+
+
+    def conversa_ou_recusa(self, driver):
+        painel = self.encontrar_aviso_numero()
+        if painel is not None:
+            raise NumeroRecusado(painel.text)
+        return self.cabecalho() and self.campo_mensagem(driver)
+
+    def acao_visivel(self, nomes, bases=None):
+        # Match actionable labels, including aria-label/title and nested span text.
+        bases = bases if bases is not None else self.visiveis(
+            '[role="menu"], [role="dialog"], [data-testid="drawer-right"], '
+            '[data-testid="contact-info-drawer"], #app [role="complementary"], '
+            '[data-animate-dropdown-menu="true"]'
+        )
+        if not bases:
+            # Portaled WhatsApp menus may not declare role=menu. Only semantic
+            # interactive actions with the exact expected label are accepted.
+            bases = [self.driver]
+        encontrados = {}
+        aceitos = {normalizar(nome) for nome in nomes}
+        for base in bases:
+            for elemento in base.find_elements(By.CSS_SELECTOR, 'button, [role="button"], [role="menuitem"], [tabindex="0"]'):
+                if not elemento.is_displayed() or not elemento.is_enabled():
+                    continue
+                if elemento.get_attribute('aria-disabled') == 'true':
+                    continue
+                rotulos = [elemento.text, elemento.get_attribute('aria-label') or '', elemento.get_attribute('title') or '']
+                if any(normalizar(rotulo) in aceitos for rotulo in rotulos):
+                    encontrados[elemento.id] = elemento
+            # Keep support for older text-only menu items from the supplied file.
+            texto = self.buscar_texto(nomes, base) if base is not self.driver else False
+            if texto:
+                botao = self.driver.execute_script(
+                    "return arguments[0].closest('button, [role=button], [role=menuitem]') || arguments[0];", texto)
+                if not self.driver.execute_script("return !!arguments[0].closest('#main .message-in, #main .message-out, #side');", botao):
+                    encontrados[botao.id] = botao
+        if len(encontrados) > 1:
+            raise RuntimeError('Ação de contato ambígua; confira o diagnóstico.')
+        return next(iter(encontrados.values()), False)
+
+    def estado_visivel(self):
+        editar = self.acao_visivel(EDITAR)
+        adicionar = self.acao_visivel(ADICIONAR)
+        if editar and adicionar:
+            raise RuntimeError('Interface exibe adicionar e editar ao mesmo tempo; estado inconclusivo.')
+        if editar:
+            return 'existente', editar
+        # In Contact info, some versions use a pencil instead of 'Edit contact'.
+        for painel in self.paineis_contato():
+            if not self.telefone_no_painel(painel, self.numero_atual):
+                continue
+            lapis = self.driver.execute_script(r"""
+                const found = new Set();
+                for (const e of arguments[0].querySelectorAll('[data-icon], button, [role=button]')) {
+                    if (!e.getClientRects().length) continue;
+                    const label = e.getAttribute('aria-label') || '';
+                    if (!/^(editar|edit|editar contato|edit contact)$/i.test(label)
+                        && !/^(edit|pencil|edit-contact)$/.test(e.getAttribute('data-icon') || '')) continue;
+                    const b = e.closest('button, [role=button]');
+                    if (b && !b.disabled && b.getAttribute('aria-disabled') !== 'true') found.add(b);
+                }
+                return found.size === 1 ? [...found][0] : null;
+            """, painel)
+            if lapis:
+                if adicionar:
+                    raise RuntimeError('Evidências de contato conflitantes nos dados do contato.')
+                return 'existente', lapis
+        if adicionar:
+            return 'novo', adicionar
+        return False
+
+    def fechar_sobreposicoes(self):
+        ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+        # The contact information drawer does not always close on Escape.
+        for painel in self.paineis_contato():
+            botao = self.acao_visivel(['Fechar', 'Close', 'Voltar', 'Back'], [painel])
+            if botao:
+                botao.click()
+                def fechado(driver):
+                    try:
+                        return not painel.is_displayed()
+                    except StaleElementReferenceException:
+                        return True
+                self.esperar(fechado)
+
+    def detectar_estado_contato(self):
+        # Some versions expose Add/Edit in the chat menu, others in Contact info.
+        # Profile names and timeouts are never evidence of a saved contact.
+        def no_menu(driver):
+            return self.estado_visivel()
+        menu = self.esperar(self.localizar_menu, 15)
+        self.conferir_parada()
+        menu.click()
+        try:
+            return self.esperar(no_menu, 5)
+        except RuntimeError as erro:
+            if not isinstance(erro.__cause__, TimeoutException):
+                raise
+        info = self.acao_visivel(['Dados do contato', 'Dados do contacto', 'Informações do contato', 'Contact info'])
+        if info:
+            info.click()
+        else:
+            ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+            # Open only the title area inside the current conversation header.
+            titulo = self.driver.execute_script(
+                r"""
+                const header = arguments[0];
+                const candidates = [...header.querySelectorAll('[data-testid="conversation-info-header-chat-title"], [title], [role="button"]')]
+                    .filter(e => e.getClientRects().length && e.innerText.trim()
+                        && !e.closest('button') && !e.querySelector('[data-icon="menu"]')
+                        && !/^(menu|mais opções|more options)$/i.test(e.getAttribute('aria-label') || ''));
+                return candidates.find(e => e.hasAttribute('title')) || (candidates.length === 1 ? candidates[0] : null);
+                """, self.cabecalho())
+            if not titulo:
+                raise RuntimeError('Não identifiquei a área de dados do contato nesta versão do WhatsApp.')
+            titulo.click()
+        self.definir_etapa('Verificando Adicionar/Editar nos dados do contato...')
+        def dados(driver):
+            estado = self.estado_visivel()
+            if estado:
+                return 'estado', estado
+            paineis = self.paineis_contato()
+            for painel in paineis:
+                botao = self.localizar_menu(driver, painel)
+                if botao:
+                    return 'menu', botao
+            return False
+        tipo, valor = self.esperar(dados, 15)
+        if tipo == 'estado':
+            return valor
+        valor.click()
+        return self.esperar(no_menu, 10)
+
+    def paineis_contato(self):
+        return self.visiveis('[data-testid="drawer-right"], [data-testid="contact-info-drawer"], #app [role="complementary"]')
+
+    def painel_formulario(self, campo):
+        return self.driver.execute_script(
+            r"""
+            const ancestors = [];
+            let p = arguments[0].parentElement;
+            while (p && p !== document.body && !['app', 'main', 'side'].includes(p.id)) {
+                ancestors.push(p);
+                p = p.parentElement;
+            }
+            const semantic = ancestors.find(e => e.matches('form, [role="dialog"], [data-testid="drawer-right"]'));
+            if (semantic) return semantic;
+            for (const e of ancestors) {
+                const text = (e.innerText || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+                const actions = [...e.querySelectorAll('button, [role="button"]')];
+                const save = actions.some(b => /^(salvar|save|guardar|concluir|done|salvar contato|save contact)$/i.test(
+                    (b.getAttribute('aria-label') || b.innerText || '').trim()));
+                if (save && /contato|contact|telefone|phone/.test(text)) return e;
+            }
+            return null;
+            """, campo) or False
+
+    def telefone_no_painel(self, painel, numero):
+        valores = self.driver.execute_script(
+            r"""
+            const p = arguments[0];
+            const values = [...p.querySelectorAll('input')].filter(e => e.getClientRects().length)
+                .map(e => e.value || '');
+            return values.concat((p.innerText || '').split(/\n/));
+            """, painel)
+        for valor in valores:
+            # Compare complete phone-like strings; do not accept arbitrary substrings.
+            for candidato in re.findall(r'\+?\d[\d\s().-]{8,}\d', valor):
+                try:
+                    if numero_brasileiro(candidato) == numero:
+                        return True
+                except ValueError:
+                    pass
+        return False
+
+    def texto_editor(self, campo):
+        return self.driver.execute_script(
+            "return arguments[0].innerText.replace(/\\r\\n?/g, '\\n');", campo)
+
+    def mensagens_saida(self):
+        linhas = self.driver.execute_script(
+            r"""
+            return [...document.querySelectorAll('#main .message-out')].map(e => {
+                const row = e.closest('[data-id]') || e.querySelector('[data-id]');
+                const text = [...e.querySelectorAll('.selectable-text')]
+                    .map(t => t.innerText).join('\n').replace(/\r\n?/g, '\n');
+                return [row && row.getAttribute('data-id'), text];
+            }).filter(([id]) => id);
+            """)
+        return dict(linhas)
+
+    def aguardar_proximo(self, base):
+        extra = random.randint(60, 180)
+        total = base + extra
+        minutos, segundos = divmod(int(total), 60)
+
+        self.log(
+            f"Base: {base:g}s + extra aleatório: {extra}s. "
+            f"Aguardando {minutos}min {segundos:02d}s "
+            "antes do próximo contato..."
+        )
+
+        if self.parar.wait(total):
+            raise InterruptedError()
+
+    def iniciar(self):
+        if not self.contatos or self.driver is None:
+            messagebox.showinfo(
+                "Preparação",
+                "Carregue o CSV e conecte o WhatsApp.",
+            )
+            return
+
+        texto = self.mensagem.get("1.0", "end-1c")
+
+        if not texto.strip():
+            messagebox.showerror(
+                "Mensagem", "Digite uma mensagem."
+            )
+            return
+
+        try:
+            base = float(
+                self.intervalo.get().replace(",", ".")
+            )
+
+            if not 0 <= base <= 86400:
+                raise ValueError()
+
+        except ValueError:
+            messagebox.showerror(
+                "Tempo base",
+                "Informe de 0 a 86400 segundos.",
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Confirmar",
+            f"Processar {len(self.contatos)} contatos?\n\n"
+            "Números nacionais recebem 55 completo.\n"
+            f"Espera: {base:g}s + 60 a 180s aleatórios.\n"
+            "Números recusados não terão espera.\n"
+            "Contatos existentes serão pulados sem envio.\n\n"
+            "Use somente pessoas que aceitaram receber mensagens.",
+        ):
+            return
+
+        contatos = list(self.contatos)
+
+        def lote():
+            enviados = 0
+            existentes = 0
+            recusados = 0
+            total = len(contatos)
+
+            for indice, contato in enumerate(contatos, 1):
+                self.conferir_parada()
+
+                self.log(
+                    f"\nCONTATO {indice}/{total}: "
+                    f"+{contato['phone']} — {contato['name']}"
+                )
+
+                try:
+                    precisa_cadastrar = self.abrir_e_detectar(
+                        contato["phone"]
+                    )
+
+                except NumeroRecusado as erro:
+                    recusados += 1
+                    self.log(
+                        f"SKIP: +{contato['phone']} — {erro}"
+                    )
+                    self.fechar_aviso_numero()
+
+                    self.log(
+                        "Número recusado. Próximo contato SEM ESPERA."
+                    )
+                    continue
+
+                if not precisa_cadastrar:
+                    existentes += 1
+
+                    if indice < total:
+                        self.aguardar_proximo(base)
+
+                    continue
+
+                self.cadastrar(contato)
+
+                self.enviar(
+                    contato,
+                    texto.replace(
+                        "{name}", contato["name"]
+                    ),
+                )
+                enviados += 1
+
+                if indice < total:
+                    self.aguardar_proximo(base)
+
+            self.log(
+                f"\nCONCLUÍDO: {enviados} envios processados; "
+                f"{existentes} contatos existentes pulados; "
+                f"{recusados} números recusados pulados."
+            )
+            self.log(
+                "Uma nova execução começa do primeiro contato."
+            )
+
+        self.executar(lote)
+
+    def diagnostico(self):
+        if self.driver is None:
+            return
+
+        try:
+            pasta = (
+                Path(__file__).resolve().parent
+                / "diagnosticos"
+            )
+            pasta.mkdir(exist_ok=True)
+
+            data = datetime.now().strftime(
+                "%Y%m%d_%H%M%S_%f"
+            )
+            imagem = pasta / f"falha_{data}.png"
+
+            elementos = self.driver.execute_script(r"""
+                return [...document.querySelectorAll('#main header button, #main header [role=button], [role=menuitem], [role=dialog] input, [data-testid=drawer-right] input')]
+                    .filter(e => e.getClientRects().length).map(e => ({tag: e.tagName, role: e.getAttribute('role'),
+                        label: e.getAttribute('aria-label'), testid: e.getAttribute('data-testid'), type: e.getAttribute('type')}));
+            """)
+            (pasta / f"falha_{data}.json").write_text(
+                json.dumps({'etapa': self.etapa, 'elementos': elementos}, ensure_ascii=False, indent=2), encoding='utf-8')
+            if self.driver.save_screenshot(str(imagem)):
+                self.log(
+                    "Captura LOCAL: " + str(imagem)
+                )
+
+        except Exception:
+            pass
+
+    def atualizar(self):
         try:
             while True:
-                kind, text = self.events.get_nowait()
-                if kind == 'progress':
-                    self.progress.set(text)
+                tipo, valor = self.eventos.get_nowait()
+
+                if tipo == "fim":
+                    self.ocupado = False
+
+                    for botao in self.botoes:
+                        botao.configure(state="normal")
+
                 else:
-                    self.logs.configure(state='normal')
-                    self.logs.insert('end', time.strftime('%H:%M:%S ') + text + '\n')
-                    self.logs.see('end')
-                    self.logs.configure(state='disabled')
-                if kind == 'done':
-                    self.running = False
-                    self.start.configure(state='normal')
+                    self.registro.configure(state="normal")
+                    self.registro.insert("end", valor + "\n")
+                    self.registro.see("end")
+                    self.registro.configure(state="disabled")
+
         except queue.Empty:
             pass
-        self.window.after(100, self.poll)
 
-    def close(self):
-        if self.running:
-            self.stop.set()
-            self.log('Parando; aguarde o navegador encerrar antes de fechar a janela.')
-        else:
-            self.window.destroy()
+        self.root.after(100, self.atualizar)
+
+    def fechar(self):
+        self.parar.set()
+
+        if self.ocupado:
+            messagebox.showinfo(
+                "Aguarde",
+                "Parada solicitada. Espere terminar "
+                "e feche novamente.",
+            )
+            return
+
+        driver = self.driver
+        self.driver = None
+        self.root.destroy()
+
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
 
 
-if __name__ == '__main__':
-    window = tk.Tk()
-    App(window)
-    window.mainloop()
+if __name__ == "__main__":
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
