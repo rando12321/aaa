@@ -314,3 +314,32 @@ class BrowserTests(unittest.TestCase):
         self.app.esperar = lambda fn, segundos=30: original(fn, min(segundos, 1))
         with self.assertRaisesRegex(RuntimeError, 'Digitando Nome'):
             self.app.digitar_nome('Ana 1234')
+
+    def test_save_review_repairs_missing_name_without_reopening(self):
+        self.app.abrir_e_detectar(self.contact['phone'])
+        self.page.locator('input[aria-label=Nome]').fill('')
+        self.page.evaluate("document.querySelector('input[aria-label=Nome]').onblur=()=>document.querySelector('#form button').disabled=false;document.querySelector('#form button').disabled=true")
+        campo = self.app.verificar_formulario_sem_salvar(self.contact)
+        self.assertEqual(self.page.locator('input[aria-label=Nome]').input_value(), self.contact['name'])
+        self.app.confirmar_cadastro(campo)
+        self.assertEqual(self.page.evaluate('localStorage.saved'), 'yes')
+
+    def test_save_review_blocks_native_validation_error(self):
+        self.app.abrir_e_detectar(self.contact['phone'])
+        self.page.locator('input[aria-label=Nome]').fill(self.contact['name'])
+        self.page.locator('input[type=tel]').evaluate("e=>e.setAttribute('pattern','[0-9]{99}')")
+        with self.assertRaisesRegex(RuntimeError, 'campo inválido'):
+            self.app.verificar_formulario_sem_salvar(self.contact)
+        self.assertIsNone(self.page.evaluate('localStorage.saved'))
+
+    def test_save_review_scrolls_panel_then_saves_without_reopening(self):
+        html = HTML.replace('<form id="form"', '<form style="height:180px;overflow:auto" onscroll="if(this.scrollTop>100)this.querySelector(\'button\').hidden=false" id="form"')
+        html = html.replace('<button type="button" aria-label="Salvar"', '<div style="height:600px"></div><button hidden type="button" aria-label="Salvar"')
+        html = html.replace("menu.hidden=true;document.getElementById('form').hidden=false", "menu.hidden=true;document.getElementById('form').hidden=false;localStorage.opens=Number(localStorage.opens||0)+1")
+        self.serve(html)
+        self.app.abrir_e_detectar(self.contact['phone'])
+        original = self.app.esperar
+        self.app.esperar = lambda fn, segundos=30: original(fn, min(segundos, 1))
+        self.app.cadastrar(self.contact)
+        self.assertEqual(self.page.evaluate('localStorage.opens'), '1')
+        self.assertEqual(self.app.cadastro_confirmado, self.contact['phone'])

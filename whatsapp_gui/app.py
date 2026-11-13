@@ -30,7 +30,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-VERSAO = "2026.11.13-v8-nome-curto-digitado"
+VERSAO = "2026.11.13-v9-conferir-antes-de-reabrir"
 
 IGNORADOS = {"11999999999", "5511999999999"}
 
@@ -770,9 +770,66 @@ class App:
                 """, painel, campo,
             ) or False
         botao = self.esperar(encontrar)
+        self.driver.execute_script("arguments[0].scrollIntoView({block:'center', inline:'nearest'});", botao)
+        def acessivel(driver):
+            return driver.execute_script(r"""
+                const b = arguments[0], r = b.getBoundingClientRect();
+                if (!r.width || !r.height || b.disabled || b.getAttribute('aria-disabled') === 'true') return false;
+                const e = document.elementFromPoint(r.left+r.width/2, r.top+r.height/2);
+                return !!e && (e === b || b.contains(e));
+            """, botao)
+        self.esperar(acessivel, 10)
         self.avisos_antes_cadastro = self.avisos_cadastro()
         self.conferir_parada()
         botao.click()
+
+    def verificar_formulario_sem_salvar(self, contato):
+        self.definir_etapa("Salvar ausente: conferindo nome, telefone, país e validação do formulário...")
+        campo = self.esperar(self.campo_nome)
+        painel = self.painel_formulario(campo)
+        if not painel:
+            raise RuntimeError("O formulário desapareceu durante a conferência. Confira o diagnóstico.")
+        self.conferir_telefone_formulario(painel, contato['phone'])
+        campo = self.esperar(self.campo_nome)
+        atributo = 'value' if campo.tag_name.lower() == 'input' else 'textContent'
+        atual = (campo.get_attribute(atributo) or '').strip()
+        if atual != contato['name']:
+            self.log(f"Nome divergente ou vazio ({len(atual)} caracteres). Digitando novamente o mesmo nome do contato.")
+            campo = self.digitar_nome(contato['name'])
+        else:
+            self.log(f"Nome correto e mantido no campo: {atual} ({len(atual)} caracteres).")
+            campo.click()
+            campo.send_keys(Keys.TAB)
+        painel = self.painel_formulario(campo)
+        if not painel:
+            raise RuntimeError("Painel de cadastro não localizado após conferir o nome.")
+        estado = self.driver.execute_script(r"""
+            const p = arguments[0];
+            const visible = e => !!e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden';
+            const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+            const fields = [...p.querySelectorAll('input, [contenteditable=true]')].filter(visible);
+            const invalid = fields.filter(e => !e.disabled && (e.getAttribute('aria-invalid') === 'true'
+                || (typeof e.checkValidity === 'function' && !e.checkValidity())))
+                .map(e => e.getAttribute('aria-label') || e.getAttribute('placeholder') || e.getAttribute('name') || 'campo sem rótulo');
+            const buttons = [...p.querySelectorAll('button, [role=button]')].filter(b => {
+                const labels = [b.innerText, b.getAttribute('aria-label'), b.title].map(norm);
+                return labels.some(t => /^(salvar|save|guardar|concluir|done|salvar contato|save contact)$/.test(t))
+                    || [...b.querySelectorAll('[data-icon]')].some(e => /^(check|checkmark|tick|done|save)$/.test(e.getAttribute('data-icon') || ''));
+            }).map(b => ({visible: visible(b), disabled: !!b.disabled || b.getAttribute('aria-disabled') === 'true'}));
+            // Scroll only the contact form and its containers, never the chat list.
+            const containers = [p, ...p.querySelectorAll('div, section')];
+            for (const e of containers) if (visible(e) && e.scrollHeight > e.clientHeight) e.scrollTop = e.scrollHeight;
+            p.scrollIntoView({block:'end', inline:'nearest'});
+            return {invalid, buttons};
+        """, painel)
+        for indice, botao in enumerate(estado['buttons'], 1):
+            self.log(f"Candidato Salvar/✓ {indice}: visível={botao['visible']}, desabilitado={botao['disabled']}.")
+        if not estado['buttons']:
+            self.log("Nenhum candidato Salvar/✓ encontrado no formulário. Aguardando renderização após conferir os campos e rolar o painel.")
+        if estado['invalid']:
+            raise RuntimeError("Formulário sinaliza campo inválido: " + ', '.join(estado['invalid']) + ". Cadastro bloqueado.")
+        self.log("Nome e telefone conferidos; sem erro de validação detectado. Verificando novamente se Salvar ficou disponível.")
+        return campo
 
     def avisos_cadastro(self):
         avisos = {}
@@ -846,24 +903,31 @@ class App:
         try:
             self.confirmar_cadastro(campo)
         except RuntimeError as erro:
-            # Only recover a timeout locating Save, before any click was attempted.
-            # Click failures and post-save failures must never cause another save.
-            if _reabertura or not isinstance(erro.__cause__, TimeoutException):
+            if not isinstance(erro.__cause__, TimeoutException):
                 raise
-            self.log("Salvar não apareceu. Reabrindo o formulário UMA VEZ e preservando nome e telefone do CSV.")
-            self.definir_etapa("Recuperando o formulário sem botão Salvar...")
-            self.conferir_parada()
-            self.driver.get("https://web.whatsapp.com/send?" + urlencode({"phone": numero}))
-            self.esperar(self.conversa_ou_recusa, 90)
-            estado, adicionar = self.detectar_estado_contato()
-            if estado == "existente":
-                self.cadastro_confirmado = numero
-                self.fechar_sobreposicoes()
-                self.log("Cadastro confirmado durante a recuperação. Próxima etapa: ENVIAR MENSAGEM.")
-                return
-            self.conferir_parada()
-            adicionar.click()
-            return self.cadastrar(contato, _reabertura=True)
+            # Inspect and correct the current form before discarding its state.
+            # A retry is allowed only after a timeout locating Save, never a click.
+            campo = self.verificar_formulario_sem_salvar(contato)
+            self.definir_etapa("4/5: procurando o botão de salvar após conferir os campos...")
+            try:
+                self.confirmar_cadastro(campo)
+            except RuntimeError as revisao:
+                if not isinstance(revisao.__cause__, TimeoutException) or _reabertura:
+                    raise
+                self.log("Salvar continua ausente após conferir os campos. Reabrindo o formulário UMA VEZ.")
+                self.definir_etapa("Recuperando o formulário sem botão Salvar...")
+                self.conferir_parada()
+                self.driver.get("https://web.whatsapp.com/send?" + urlencode({"phone": numero}))
+                self.esperar(self.conversa_ou_recusa, 90)
+                estado, adicionar = self.detectar_estado_contato()
+                if estado == "existente":
+                    self.cadastro_confirmado = numero
+                    self.fechar_sobreposicoes()
+                    self.log("Cadastro confirmado durante a recuperação. Próxima etapa: ENVIAR MENSAGEM.")
+                    return
+                self.conferir_parada()
+                adicionar.click()
+                return self.cadastrar(contato, _reabertura=True)
         def fechado(driver):
             try:
                 return not campo.is_displayed()
