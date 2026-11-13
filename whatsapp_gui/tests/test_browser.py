@@ -349,3 +349,25 @@ class BrowserTests(unittest.TestCase):
         self.app.cadastrar(self.contact)
         self.assertEqual(self.page.evaluate('localStorage.opens'), '1')
         self.assertEqual(self.app.cadastro_confirmado, self.contact['phone'])
+
+    def test_invalid_phone_validation_reopens_before_save_then_sends(self):
+        html = HTML.replace("menu.hidden=true;document.getElementById('form').hidden=false",
+            "menu.hidden=true;document.getElementById('form').hidden=false;localStorage.opens=Number(localStorage.opens||0)+1;if(Number(localStorage.opens)===1)document.querySelector('input[type=tel]').setAttribute('aria-invalid','true')")
+        self.serve(html)
+        self.app.abrir_e_detectar(self.contact['phone'])
+        self.app.cadastrar(self.contact)
+        self.assertEqual(self.page.evaluate('localStorage.opens'), '2')
+        self.assertEqual(self.app.cadastro_confirmado, self.contact['phone'])
+        self.app.enviar(self.contact, 'Mensagem após recuperar validação')
+        self.assertEqual(self.page.evaluate('window.sent'), 1)
+
+    def test_persistent_invalid_phone_reopens_once_and_never_saves(self):
+        html = HTML.replace("menu.hidden=true;document.getElementById('form').hidden=false",
+            "menu.hidden=true;document.getElementById('form').hidden=false;localStorage.opens=Number(localStorage.opens||0)+1;document.querySelector('input[type=tel]').setAttribute('aria-invalid','true')")
+        self.serve(html)
+        self.app.abrir_e_detectar(self.contact['phone'])
+        with self.assertRaisesRegex(RuntimeError, 'já foi reaberto uma vez'):
+            self.app.cadastrar(self.contact)
+        self.assertEqual(self.page.evaluate('localStorage.opens'), '2')
+        self.assertIsNone(self.page.evaluate('localStorage.saved'))
+        self.assertIsNone(self.page.evaluate('window.sent'))

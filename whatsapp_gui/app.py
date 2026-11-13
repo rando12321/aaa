@@ -30,7 +30,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-VERSAO = "2026.11.13-v10-salvar-limite-5s"
+VERSAO = "2026.11.13-v11-reabrir-erro-validacao"
 
 IGNORADOS = {"11999999999", "5511999999999"}
 
@@ -66,6 +66,10 @@ PAINEIS = (
 
 
 class NumeroRecusado(Exception):
+    pass
+
+
+class FormularioInvalido(RuntimeError):
     pass
 
 
@@ -827,7 +831,7 @@ class App:
         if not estado['buttons']:
             self.log("Nenhum candidato Salvar/✓ encontrado no formulário. Aguardando renderização após conferir os campos e rolar o painel.")
         if estado['invalid']:
-            raise RuntimeError("Formulário sinaliza campo inválido: " + ', '.join(estado['invalid']) + ". Cadastro bloqueado.")
+            raise FormularioInvalido("Formulário sinaliza campo inválido: " + ', '.join(estado['invalid']) + ". Cadastro bloqueado.")
         self.log("Nome e telefone conferidos; sem erro de validação detectado. Verificando novamente se Salvar ficou disponível.")
         return campo
 
@@ -900,16 +904,22 @@ class App:
             raise RuntimeError("Não identifiquei o painel Novo contato. Cadastro bloqueado; veja o diagnóstico.")
         self.conferir_telefone_formulario(painel, numero)
         campo = self.digitar_nome(nome)
-        campo = self.verificar_formulario_sem_salvar(contato)
         try:
+            campo = self.verificar_formulario_sem_salvar(contato)
             self.confirmar_cadastro(campo)
         except RuntimeError as erro:
-            # No extra field-check or second wait after the five-second deadline.
-            # Recovery is only for locating Save; an uncertain click is not retried.
-            if not isinstance(erro.__cause__, TimeoutException) or _reabertura:
+            # Both failures occur before clicking Save. Never retry uncertain clicks.
+            recuperavel = isinstance(erro, FormularioInvalido) or isinstance(erro.__cause__, TimeoutException)
+            if not recuperavel:
                 raise
-            self.log("Salvar não apareceu em 5 segundos. Fechando e reabrindo Adicionar contato UMA VEZ.")
-            self.definir_etapa("Reabrindo Adicionar contato após limite de 5 segundos...")
+            if _reabertura:
+                raise RuntimeError("Adicionar contato já foi reaberto uma vez e continua sem condições de salvar: " + str(erro)) from erro
+            if isinstance(erro, FormularioInvalido):
+                self.log(str(erro))
+                self.log("Validação impediu Salvar. Fechando e reabrindo Adicionar contato UMA VEZ, sem clicar em Salvar.")
+            else:
+                self.log("Salvar não apareceu em 5 segundos. Fechando e reabrindo Adicionar contato UMA VEZ.")
+            self.definir_etapa("Reabrindo Adicionar contato após falha antes de Salvar...")
             self.conferir_parada()
             self.driver.get("https://web.whatsapp.com/send?" + urlencode({"phone": numero}))
             self.esperar(self.conversa_ou_recusa, 90)
