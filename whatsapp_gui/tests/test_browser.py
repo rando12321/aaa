@@ -3,7 +3,7 @@ import queue
 import shutil
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from playwright.sync_api import sync_playwright
 from app import App, NumeroRecusado
 from dom_driver import DomDriver
@@ -223,3 +223,40 @@ class BrowserTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Cadastro bloqueado'):
             self.app.conferir_telefone_formulario(painel, '5579981656650')
         self.assertEqual(self.page.locator('input[type=tel]').input_value(), '79981656650')
+
+    def test_save_success_notice_sends_without_checking_edit_again(self):
+        html = HTML.replace("localStorage.saved='yes';form.hidden=true;document.getElementById('action').textContent='Editar contato'",
+            "localStorage.saved='yes';form.hidden=true;const notice=document.createElement('div');notice.setAttribute('role','status');notice.innerText='Contato salvo com sucesso';document.body.append(notice);document.getElementById('main').remove()")
+        self.serve(html)
+        self.app.abrir_e_detectar(self.contact['phone'])
+        with patch.object(self.app, 'detectar_estado_contato', side_effect=AssertionError('não deve verificar Editar após aviso de sucesso')):
+            self.app.cadastrar(self.contact)
+        self.app.enviar(self.contact, 'Mensagem imediatamente após cadastro')
+        self.assertEqual(self.page.evaluate('window.sent'), 1)
+
+    def test_stale_save_notice_does_not_confirm_new_contact(self):
+        html = HTML.replace("localStorage.saved='yes';form.hidden=true;document.getElementById('action').textContent='Editar contato'", "form.hidden=true")
+        html += '<div role="status">Contato salvo com sucesso</div>'
+        self.serve(html)
+        self.app.abrir_e_detectar(self.contact['phone'])
+        with self.assertRaisesRegex(RuntimeError, 'cadastro não foi confirmado'):
+            self.app.cadastrar(self.contact)
+        self.assertIsNone(self.app.cadastro_confirmado)
+        self.assertIsNone(self.page.evaluate('window.sent'))
+
+    def test_batch_adds_then_sends_same_contact_without_skip(self):
+        self.app.contatos = [self.contact]
+        self.app.mensagem = Mock()
+        self.app.mensagem.get.return_value = 'Olá, {name}!'
+        self.app.intervalo = Mock()
+        self.app.intervalo.get.return_value = '0'
+        self.app.executar = lambda tarefa: tarefa()
+        with patch('app.messagebox.askyesno', return_value=True), patch.object(self.app, 'aguardar_proximo') as wait:
+            self.app.iniciar()
+        self.assertEqual(self.page.evaluate('window.sent'), 1)
+        self.assertIn('Olá, Nome CSV!', self.app.mensagens_saida().values())
+        wait.assert_not_called()
+        logs = []
+        while not self.app.eventos.empty():
+            logs.append(self.app.eventos.get()[1])
+        self.assertFalse(any('SKIP:' in log for log in logs))

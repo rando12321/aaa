@@ -30,7 +30,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-VERSAO = "2026.11.13-v5-telefone-do-formulario"
+VERSAO = "2026.11.13-v6-cadastrar-e-enviar"
 
 IGNORADOS = {"11999999999", "5511999999999"}
 
@@ -762,8 +762,29 @@ class App:
                 """, painel, campo,
             ) or False
         botao = self.esperar(encontrar)
+        self.avisos_antes_cadastro = self.avisos_cadastro()
         self.conferir_parada()
         botao.click()
+
+    def avisos_cadastro(self):
+        avisos = {}
+        for elemento in self.visiveis('[role="alert"], [role="status"], [data-testid="toast"]'):
+            texto = normalizar(elemento.text)
+            if re.search(r'\b(?:contato|contacto) (?:foi )?(?:adicionado|salvo|guardado)(?: com sucesso)?\b|\bcontact (?:was )?(?:added|saved)(?: successfully)?\b', texto):
+                avisos[elemento.id] = texto
+        return avisos
+
+    def confirmar_aviso_cadastro(self):
+        antes = getattr(self, 'avisos_antes_cadastro', {})
+        def novo(driver):
+            return any(antes.get(chave) != texto for chave, texto in self.avisos_cadastro().items())
+        try:
+            self.esperar(novo, 3)
+            return True
+        except RuntimeError as erro:
+            if not isinstance(erro.__cause__, TimeoutException):
+                raise
+            return False
 
     def cadastrar(self, contato):
         nome, numero = contato["name"], contato["phone"]
@@ -800,6 +821,12 @@ class App:
             except StaleElementReferenceException:
                 return True
         self.esperar(fechado)
+        self.definir_etapa("Confirmando o aviso de contato salvo para seguir ao envio...")
+        if self.confirmar_aviso_cadastro():
+            self.cadastro_confirmado = numero
+            self.log("Contato recém-cadastrado confirmado pelo WhatsApp. Próxima etapa: ENVIAR MENSAGEM.")
+            return
+        self.log("Aviso de sucesso não localizado. Verificando apenas se o cadastro foi salvo; este contato NÃO será pulado.")
         # Saving may return WhatsApp to its home screen. Escape with no open
         # overlay can also close a chat, so navigate instead of dismissing blindly.
         self.definir_etapa("Reabrindo o destinatário após salvar o contato...")
@@ -811,7 +838,7 @@ class App:
         if estado != "existente":
             raise RuntimeError("O formulário fechou, mas o cadastro não foi confirmado. Envio bloqueado.")
         self.cadastro_confirmado = numero
-        self.log("Cadastro confirmado pela interface: Editar contato disponível.")
+        self.log("Contato recém-cadastrado confirmado por Editar contato. Próxima etapa: ENVIAR MENSAGEM.")
 
     def enviar(self, contato, texto):
         numero = contato["phone"]
@@ -1233,7 +1260,7 @@ class App:
                     continue
 
                 self.cadastrar(contato)
-
+                self.log("Cadastro concluído neste lote: enviando a mensagem agora, sem aplicar SKIP de contato existente.")
                 self.enviar(
                     contato,
                     texto.replace(
