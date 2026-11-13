@@ -260,3 +260,41 @@ class BrowserTests(unittest.TestCase):
         while not self.app.eventos.empty():
             logs.append(self.app.eventos.get()[1])
         self.assertFalse(any('SKIP:' in log for log in logs))
+
+    def test_missing_save_reopens_once_preserving_name_and_phone_then_sends(self):
+        html = HTML.replace("menu.hidden=true;document.getElementById('form').hidden=false",
+            "menu.hidden=true;document.getElementById('form').hidden=false;localStorage.opens=Number(localStorage.opens||0)+1;if(Number(localStorage.opens)===1)document.querySelector('#form button').remove()")
+        html = html.replace("localStorage.saved='yes';", "localStorage.savedName=document.querySelector('input[aria-label=Nome]').value;localStorage.saved='yes';")
+        self.serve(html)
+        self.app.abrir_e_detectar(self.contact['phone'])
+        original = self.app.esperar
+        self.app.esperar = lambda fn, segundos=30: original(fn, min(segundos, 1))
+        self.app.cadastrar(self.contact)
+        self.assertEqual(self.page.evaluate('localStorage.opens'), '2')
+        self.assertEqual(self.page.evaluate('localStorage.savedName'), self.contact['name'])
+        self.app.enviar(self.contact, 'Mensagem após recuperar formulário')
+        self.assertEqual(self.page.evaluate('window.sent'), 1)
+        self.assertEqual(self.page.evaluate('localStorage.opens'), '2')
+
+    def test_missing_save_twice_stops_without_loop_or_send(self):
+        html = HTML.replace("menu.hidden=true;document.getElementById('form').hidden=false",
+            "menu.hidden=true;document.getElementById('form').hidden=false;localStorage.opens=Number(localStorage.opens||0)+1;document.querySelector('#form button').remove()")
+        self.serve(html)
+        self.app.abrir_e_detectar(self.contact['phone'])
+        original = self.app.esperar
+        self.app.esperar = lambda fn, segundos=30: original(fn, min(segundos, 1))
+        with self.assertRaisesRegex(RuntimeError, 'botão de salvar'):
+            self.app.cadastrar(self.contact)
+        self.assertEqual(self.page.evaluate('localStorage.opens'), '2')
+        self.assertIsNone(self.app.cadastro_confirmado)
+        self.assertIsNone(self.page.evaluate('window.sent'))
+
+    def test_uncertain_save_click_does_not_reopen_or_retry(self):
+        from selenium.common.exceptions import TimeoutException
+        self.app.abrir_e_detectar(self.contact['phone'])
+        with patch.object(self.app, 'confirmar_cadastro', side_effect=TimeoutException('clique com resultado incerto')) as save, patch.object(self.app.driver, 'get') as navigate:
+            with self.assertRaises(TimeoutException):
+                self.app.cadastrar(self.contact)
+            save.assert_called_once()
+            navigate.assert_not_called()
+        self.assertIsNone(self.page.evaluate('window.sent'))

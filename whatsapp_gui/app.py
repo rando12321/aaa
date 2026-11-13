@@ -30,7 +30,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-VERSAO = "2026.11.13-v6-cadastrar-e-enviar"
+VERSAO = "2026.11.13-v7-recuperar-formulario"
 
 IGNORADOS = {"11999999999", "5511999999999"}
 
@@ -786,7 +786,7 @@ class App:
                 raise
             return False
 
-    def cadastrar(self, contato):
+    def cadastrar(self, contato, _reabertura=False):
         nome, numero = contato["name"], contato["phone"]
         self.definir_etapa("3/5: abrindo o formulário e preenchendo Nome...")
         def formulario(driver):
@@ -814,7 +814,28 @@ class App:
         atributo = "value" if campo.tag_name.lower() == "input" else "textContent"
         if (campo.get_attribute(atributo) or "").strip() != nome:
             raise RuntimeError("O campo Nome não recebeu o texto esperado.")
-        self.confirmar_cadastro(campo)
+        campo.send_keys(Keys.TAB)
+        try:
+            self.confirmar_cadastro(campo)
+        except RuntimeError as erro:
+            # Only recover a timeout locating Save, before any click was attempted.
+            # Click failures and post-save failures must never cause another save.
+            if _reabertura or not isinstance(erro.__cause__, TimeoutException):
+                raise
+            self.log("Salvar não apareceu. Reabrindo o formulário UMA VEZ e preservando nome e telefone do CSV.")
+            self.definir_etapa("Recuperando o formulário sem botão Salvar...")
+            self.conferir_parada()
+            self.driver.get("https://web.whatsapp.com/send?" + urlencode({"phone": numero}))
+            self.esperar(self.conversa_ou_recusa, 90)
+            estado, adicionar = self.detectar_estado_contato()
+            if estado == "existente":
+                self.cadastro_confirmado = numero
+                self.fechar_sobreposicoes()
+                self.log("Cadastro confirmado durante a recuperação. Próxima etapa: ENVIAR MENSAGEM.")
+                return
+            self.conferir_parada()
+            adicionar.click()
+            return self.cadastrar(contato, _reabertura=True)
         def fechado(driver):
             try:
                 return not campo.is_displayed()
