@@ -248,7 +248,7 @@ class App:
         ttk.Label(
             root,
             text=(
-                "Brasil +55. Contatos existentes são pulados. "
+                "Brasil +55. Contatos existentes são pulados sem espera. "
                 "Números recusados passam ao próximo sem espera."
             ),
         ).pack(anchor="w", padx=12, pady=(8, 0))
@@ -1101,9 +1101,9 @@ class App:
             "Confirmar",
             f"Processar {len(self.contatos)} contatos?\n\n"
             "Números nacionais recebem 55 completo.\n"
-            f"Espera: {base:g}s + 60 a 180s aleatórios.\n"
+            f"Espera após envio: {base:g}s + 60 a 180s aleatórios.\n"
             "Números recusados não terão espera.\n"
-            "Contatos existentes serão pulados sem envio.\n\n"
+            "Contatos existentes serão pulados sem envio e sem espera.\n\n"
             "Use somente pessoas que aceitaram receber mensagens.",
         ):
             return
@@ -1143,10 +1143,7 @@ class App:
 
                 if not precisa_cadastrar:
                     existentes += 1
-
-                    if indice < total:
-                        self.aguardar_proximo(base)
-
+                    self.log("Contato existente. Próximo contato SEM ESPERA.")
                     continue
 
                 self.cadastrar(contato)

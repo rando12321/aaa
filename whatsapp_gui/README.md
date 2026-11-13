@@ -19,7 +19,7 @@ O Selenium Manager localiza/obtém o ChromeDriver compatível. Em máquinas com 
 
 ## Recursos preservados
 
-A tela, os botões, a confirmação antes do lote, os logs por etapa, as capturas locais, a geração de nomes, as regras do CSV e de exclusão, a deduplicação, a normalização +55, a personalização e as esperas permanecem. A espera continua sendo base + inteiro aleatório de 60 a 180 segundos, após envio ou contato existente; recusa segue sem espera e o último contato não gera espera. As restrições originais do CSV, inclusive nomes distintos por contato, foram mantidas. Não foi adicionada retomada automática entre execuções nem sincronização com a agenda do celular.
+A tela, os botões, a confirmação antes do lote, os logs por etapa, as capturas locais, a geração de nomes, as regras do CSV e de exclusão, a deduplicação, a normalização +55, a personalização e as esperas permanecem. A espera continua sendo base + inteiro aleatório de 60 a 180 segundos, somente após envio; contato existente e número recusado seguem sem espera e o último contato não gera espera. As restrições originais do CSV, inclusive nomes distintos por contato, foram mantidas. Não foi adicionada retomada automática entre execuções nem sincronização com a agenda do celular.
 
 ## Correções
 
