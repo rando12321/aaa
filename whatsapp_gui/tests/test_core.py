@@ -65,7 +65,7 @@ class CoreTests(unittest.TestCase):
             with self.subTest(existing_only=existing_only):
                 app = App.__new__(App)
                 app.contatos = [{'phone': str(i), 'name': f'Nome {i}'} for i in range(3)]
-                app.driver = object()
+                app.driver = Mock()
                 app.mensagem = Mock()
                 app.mensagem.get.return_value = 'Olá, {name}'
                 app.intervalo = Mock()

@@ -55,3 +55,31 @@ class NativeKeyboardTests(unittest.TestCase):
         with self.assertRaises(InterruptedError):
             teclado.digitar('Ana', parar, lambda: True)
         teclado.api.SendInput.assert_not_called()
+
+    def test_native_mouse_uses_virtual_desktop_coordinates(self):
+        from app import DesktopWindows
+        base = self.keyboard()
+        desktop = DesktopWindows.__new__(DesktopWindows)
+        desktop.__dict__.update(base.__dict__)
+        desktop.rect = lambda: (0, 0, 100, 100)
+        desktop.rect_anterior = desktop.rect()
+        desktop.api.GetSystemMetrics.side_effect = lambda n: {76:-1920,77:0,78:3840,79:1080}[n]
+        batches = []
+        def send(count, entries, size):
+            batches.append([(e.mi.dx,e.mi.dy,e.mi.dwFlags) for e in entries])
+            return count
+        desktop.api.SendInput.side_effect = send
+        desktop.clicar(50, 25)
+        self.assertEqual(batches[0][0][0], round((50+1920)*65535/3839))
+        self.assertEqual([row[2] for row in batches[0]], [0x8000|0x4000|1, 2, 4])
+
+    def test_moved_window_blocks_mouse_input(self):
+        from app import DesktopWindows
+        base = self.keyboard()
+        desktop = DesktopWindows.__new__(DesktopWindows)
+        desktop.__dict__.update(base.__dict__)
+        desktop.rect_anterior = (0,0,100,100)
+        desktop.rect = lambda: (10,0,110,100)
+        with self.assertRaisesRegex(RuntimeError, 'janela foi movida'):
+            desktop.clicar(50,25)
+        desktop.api.SendInput.assert_not_called()
