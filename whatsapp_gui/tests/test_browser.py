@@ -4,8 +4,8 @@ import tempfile
 import threading
 import unittest
 from playwright.sync_api import sync_playwright
-from browser import WhatsApp
-from core import Contact
+from app import WhatsApp
+from app import Contact
 
 
 class BrowserTests(unittest.TestCase):

@@ -1,11 +1,19 @@
 # Contatos e mensagens pelo WhatsApp Web
 
-Aplicativo Python/Tkinter independente dos outros arquivos deste repositório.
+Aplicativo Python/Tkinter completo em **um único arquivo: `app.py`**. Você pode baixar somente esse arquivo; ele não importa módulos locais do projeto.
 Requer Python 3.12+, Tkinter, ambiente gráfico e login pelo QR. Interface do WhatsApp em português ou inglês.
 
 ## Instalação
 
-Execute nesta pasta:
+Para usar somente o arquivo, instale a dependência e o navegador, depois execute:
+
+```sh
+python -m pip install playwright==1.56.0
+python -m playwright install chromium
+python app.py
+```
+
+Para desenvolvimento e testes, execute nesta pasta:
 
 ```sh
 python -m venv .venv
@@ -32,4 +40,4 @@ Escolha CSV UTF-8 com `phone,name`, separado por vírgula ou ponto e vírgula. I
 - `.local/historico.jsonl` registra tentativas antes de qualquer alteração. Números registrados não são repetidos em execuções posteriores. Revise manualmente a conversa antes de remover registros para tentar novamente. Isto evita duplicação, mas não é retomada automática de etapas.
 - Perfil autenticado, histórico e capturas ficam em `.local/`, ignorada pelo Git. Proteja essa pasta: contém dados pessoais e sessão autenticada. Não sincroniza a agenda do celular.
 
-Os testes locais validam importação, normalização e espera. A abertura do navegador e a GUI podem ser verificadas sem login. A sequência completa cadastro → salvar → enviar exige teste manual com conta autenticada e destinatário autorizado; não foi confirmada nesta entrega.
+Os nove testes locais validam importação, normalização, espera e cenários simulados de recusa, contato existente e telefone divergente no Chromium. A abertura do navegador e a GUI podem ser verificadas sem login. A sequência completa cadastro → salvar → enviar exige teste manual com conta autenticada e destinatário autorizado; não foi confirmada nesta entrega.

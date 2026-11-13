@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
-from core import normalize_phone, read_contacts, wait_seconds
+from app import normalize_phone, read_contacts, wait_seconds
 
 
 class CoreTests(unittest.TestCase):
