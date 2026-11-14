@@ -160,3 +160,47 @@ class DOMTests(unittest.TestCase):
         self.page.locator('#form').evaluate("e=>{e.hidden=false;e.style.height='320px';e.style.overflow='auto'}")
         self.tela.clicar(('Salvar',),5)
         self.assertEqual(self.page.evaluate('localStorage.saved'),'yes')
+
+    def contact_info_html(self, header_fallback=False):
+        html=HTML.replace("document.querySelector('#form').hidden=false", "document.querySelector('#info').hidden=false")
+        html=html.replace("if(localStorage.saved) document.querySelector('#action').textContent='Editar contato';", "document.querySelector('#action').textContent='Dados do contato';")
+        html+='''<aside data-testid="contact-info-drawer" id="info" hidden style="position:absolute;left:400px;top:0;width:600px;height:700px;background:white;z-index:20">
+        <h2>Dados do contato</h2><p>Nome salvo diferente do CSV</p><span style="position:absolute;left:50px;top:180px">+55 93 98410-8321</span>
+        <button aria-label="Menu" style="position:absolute;left:500px;top:30px;width:50px;height:35px" onclick="document.querySelector('#info-menu').hidden=false">Menu</button></aside>
+        <div id="info-menu" role="menu" hidden style="position:absolute;left:750px;top:100px;z-index:30"><button role="menuitem">Editar contato</button></div>'''
+        if header_fallback:
+            html=html.replace("document.querySelector('#action').textContent='Dados do contato';", "document.querySelector('#action').textContent='Limpar conversa';")
+            html=html.replace('<header>', '<header><span title="Nome salvo diferente do CSV" style="position:absolute;left:450px;top:30px" onclick="document.querySelector(\'#info\').hidden=false">Nome salvo diferente do CSV</span>')
+        return html
+
+    def test_existing_contact_found_in_contact_info_internal_menu(self):
+        html=self.contact_info_html()
+        self.page.unroute('https://web.whatsapp.com/**')
+        self.page.route('https://web.whatsapp.com/**',lambda route:route.fulfill(body=html,content_type='text/html; charset=utf-8'))
+        original=self.tela.aguardar
+        self.tela.aguardar=lambda fn,seconds,stage:original(fn,min(seconds,5 if 'menu interno' in stage else 1),stage)
+        self.assertFalse(self.app.abrir_e_detectar(self.contact['phone']))
+        self.assertIsNone(self.page.evaluate('window.sent'))
+        self.assertIsNone(self.page.evaluate('localStorage.saved'))
+
+    def test_header_opens_contact_info_when_chat_menu_has_no_info_entry(self):
+        html=self.contact_info_html(header_fallback=True)
+        self.page.unroute('https://web.whatsapp.com/**')
+        self.page.route('https://web.whatsapp.com/**',lambda route:route.fulfill(body=html,content_type='text/html; charset=utf-8'))
+        original=self.tela.aguardar
+        self.tela.aguardar=lambda fn,seconds,stage:original(fn,min(seconds,5 if 'menu interno' in stage else 1),stage)
+        self.assertFalse(self.app.abrir_e_detectar(self.contact['phone']))
+        self.assertIsNone(self.page.evaluate('window.sent'))
+        self.assertIsNone(self.page.evaluate('localStorage.saved'))
+
+    def test_profile_name_alone_does_not_prove_saved_contact(self):
+        html=self.contact_info_html(header_fallback=True).replace('>Editar contato</button>','>Bloquear</button>')
+        self.page.unroute('https://web.whatsapp.com/**')
+        self.page.route('https://web.whatsapp.com/**',lambda route:route.fulfill(body=html,content_type='text/html; charset=utf-8'))
+        self.contact['name']='Nome salvo diferente do CSV'
+        original=self.tela.aguardar
+        self.tela.aguardar=lambda fn,seconds,stage:original(fn,min(seconds,2),stage)
+        with self.assertRaises(TimeoutError):
+            self.app.abrir_e_detectar(self.contact['phone'])
+        self.assertIsNone(self.page.evaluate('window.sent'))
+        self.assertIsNone(self.page.evaluate('localStorage.saved'))

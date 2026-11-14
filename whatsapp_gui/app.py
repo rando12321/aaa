@@ -21,7 +21,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import urlencode
 
-VERSAO = '2026.11.14-v19-url-com-foco-e-pausa'
+VERSAO = '2026.11.14-v20-verificar-dados-e-menu-interno'
 IGNORADOS = {'11999999999', '5511999999999'}
 
 class NumeroRecusado(Exception):
@@ -543,7 +543,7 @@ def capturar_bmp(desktop, destino):
 
 # Read-only DOM inspection. No click, key, focus, value assignment or dispatchEvent here.
 DOM_LEITURA = r"""
-const only = arguments[0];
+const only = arguments[0], scope=arguments[1]||document;
 const show = e => {
  if (!e || !e.isConnected) return null;
  const r=e.getBoundingClientRect(), s=getComputedStyle(e);
@@ -560,6 +560,7 @@ const show = e => {
  if (!name.trim() && /^(menu|more-vertical|overflow-menu)$/.test(icon)) name='Menu';
  if (!name.trim() && /^(x|x-alt|close|cross)$/.test(icon)) name='Fechar';
  if (!name.trim() && icon==='send') name='Enviar';
+ if (!name.trim() && scope!==document && /^(edit|pencil|edit-contact)$/.test(icon)) name='Editar';
  if (!name.trim() && /^(check|checkmark|checkmark-medium|done|save)$/.test(icon)
      && r.top>innerHeight*.6 && !e.closest('label,[data-testid*=phone],[data-testid*=input]')) name='Salvar';
  if (outgoing) name='Você: '+[...e.querySelectorAll('.selectable-text')].map(t=>t.innerText).join('\n');
@@ -578,9 +579,9 @@ const show = e => {
   help:e.getAttribute('title')||'',aria:'invalid:'+e.getAttribute('aria-invalid')};
 };
 if (only) return show(only);
-const items=new Set(document.querySelectorAll('button,[role=button],[role=menuitem],[tabindex="0"],input:not([type=hidden]),textarea,[contenteditable=true][role=textbox],select,[role=combobox],.message-out,[role=heading],[role=alert],[role=status],[role=dialog],[role=alertdialog],[data-animate-modal-popup=true],[data-testid=popup-contents]'));
+const items=new Set(scope.querySelectorAll('button,[role=button],[role=menuitem],[tabindex="0"],input:not([type=hidden]),textarea,[contenteditable=true][role=textbox],select,[role=combobox],.message-out,[role=heading],[role=alert],[role=status],[role=dialog],[role=alertdialog],[data-animate-modal-popup=true],[data-testid=popup-contents]'));
 // Visible phone/contact headings may be plain spans rather than semantic headings.
-for (const e of document.querySelectorAll('span,label,h1,h2,h3')) {
+for (const e of scope.querySelectorAll('span,label,h1,h2,h3')) {
  if (!e.children.length && /^(Novo contato|New contact|Criar contato|\+?55[\d\s().-]{10,})$/i.test((e.innerText||'').trim())) items.add(e);
 }
 return [...items].filter(e=>!e.closest('#side,#pane-side,.message-in') && (!e.closest('.message-out')||e.matches('.message-out'))).map(show).filter(Boolean);
@@ -658,6 +659,54 @@ class LeitorSelenium:
         py=round(y+(box[1]+box[3])/2*scale)-top
         self.desktop.rolar(px,py,480 if box[4]<box[1] else -480)
         return True
+
+    def painel_dados(self):
+        return self.executar_leitura(r"""
+            const norm=t=>(t||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+            const visible=e=>e.getClientRects().length && getComputedStyle(e).visibility!=='hidden';
+            const isTitle=e=>/^(dados do contato|dados do contacto|informacoes do contato|contact info)$/.test(norm(e.innerText));
+            const candidates=[];
+            for(const e of document.querySelectorAll('[data-testid="drawer-right"],[data-testid="contact-info-drawer"],[role=complementary],[role=dialog]')){
+                if(visible(e) && /dados do contato|dados do contacto|informacoes do contato|contact info/.test(norm(e.innerText)))candidates.push(e);
+            }
+            if(!candidates.length)for(const title of document.querySelectorAll('span,h1,h2,h3,[role=heading]')){
+                if(!visible(title)||!isTitle(title)||title.children.length)continue;
+                for(let p=title.parentElement;p && p!==document.body && !['app','side','pane-side'].includes(p.id);p=p.parentElement){
+                    const r=p.getBoundingClientRect();
+                    if(r.width>200 && r.height>innerHeight*.4 && /\+?\d[\d ().-]{9,}/.test(p.innerText||'')){candidates.push(p);break;}
+                }
+            }
+            candidates.sort((a,b)=>a.getBoundingClientRect().width*a.getBoundingClientRect().height-b.getBoundingClientRect().width*b.getBoundingClientRect().height);
+            return candidates[0]||null;
+        """)
+
+    def controles_dados(self):
+        painel=self.painel_dados()
+        if painel is None:
+            return []
+        viewport=self.viewport()
+        return [self.elemento(item,viewport) for item in self.executar_leitura(DOM_LEITURA,None,painel)]
+
+    def menu_aberto(self):
+        return bool(self.executar_leitura(r"""
+            return [...document.querySelectorAll('[role=menu],[data-animate-dropdown-menu=true],[role=menuitem]')]
+                .some(e=>e.getClientRects().length && getComputedStyle(e).visibility!=='hidden');
+        """))
+
+    def alvo_dados_cabecalho(self):
+        elemento=self.executar_leitura(r"""
+            const header=document.querySelector('#main header');
+            if(!header)return null;
+            const selectors=['[data-testid="conversation-info-header-chat-title"]','[title]'];
+            for(const selector of selectors){
+                const found=[...header.querySelectorAll(selector)].filter(e=>e.getClientRects().length
+                    && (e.innerText||'').trim() && !e.closest('button') && !e.querySelector('[data-icon]'));
+                if(found.length===1)return found[0];
+            }
+            return null;
+        """)
+        data=self.executar_leitura(DOM_LEITURA,elemento) if elemento is not None else None
+        return self.elemento(data,self.viewport()) if data else None
 
     def close(self):
         self.driver.quit()
@@ -821,20 +870,41 @@ class TelaNativa:
         try:
             return self.aguardar(estado, 5, 'Adicionar/Editar contato')
         except TimeoutError:
-            dados = self.buscar(('Dados do contato','Dados do contacto','Informações do contato','Contact info'))
-            if not dados:
-                raise
+            self.log('Adicionar/Editar não apareceu no menu da conversa. Abrindo Dados do contato para verificar antes de cadastrar.')
+            dados=self.buscar(('Dados do contato','Dados do contacto','Informações do contato','Contact info'))
+            if dados is None and hasattr(self.client,'alvo_dados_cabecalho'):
+                if self.client.menu_aberto():
+                    self.desktop.atalho(0x1B)
+                dados=self.client.alvo_dados_cabecalho()
+            if dados is None:
+                raise NativeUIError('Não localizei Dados do contato no menu nem o título clicável da conversa. Estado do cadastro inconclusivo.')
             self.clicar_elemento(dados)
+            menu_interno_aberto=False
             def nos_dados():
-                e = estado()
+                nonlocal menu_interno_aberto
+                e=estado()
                 if e:
                     return e
-                elementos = self.snapshot()
-                editar = self.buscar(('Editar','Edit'), elementos=elementos)
-                if editar and self.telefone_confirmado(self.numero_atual, elementos):
+                elementos=self.client.controles_dados() if hasattr(self.client,'controles_dados') else self.snapshot()
+                editar=self.buscar(('Editar','Edit')+EDITAR,elementos=elementos)
+                if editar and self.telefone_confirmado(self.numero_atual,elementos):
                     return 'existente'
+                adicionar=self.buscar(ADICIONAR,elementos=elementos)
+                if adicionar:
+                    return 'novo'
+                if not menu_interno_aberto:
+                    menu=self.buscar(('Menu','Mais opções','More options'),elementos=elementos)
+                    if menu:
+                        self.log('Abrindo o menu interno de Dados do contato para procurar Editar contato.')
+                        self.clicar_elemento(menu)
+                        menu_interno_aberto=True
+                if menu_interno_aberto:
+                    # Portaled menu items may be outside the drawer DOM subtree.
+                    generico=self.buscar(('Editar','Edit'))
+                    if generico and self.telefone_confirmado(self.numero_atual,elementos):
+                        return 'existente'
                 return False
-            return self.aguardar(nos_dados, 10, 'contato salvo nos dados do contato')
+            return self.aguardar(nos_dados,15,'Adicionar/Editar nos dados do contato e no menu interno')
 
     def aviso_recusa(self, elementos=None):
         elementos = self.snapshot() if elementos is None else elementos
