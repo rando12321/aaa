@@ -95,6 +95,11 @@ class NativeDesktopFixture:
     def rolar(self,x,y,delta):
         self.page.mouse.move(x,y)
         self.page.mouse.wheel(0,-delta)
+    def abrir_url(self,url,parar,conferir_barra=None):
+        self.atalho(0x11,0x4C)
+        self.escrever(url,parar)
+        self.atalho(0x0D)
+
     def atalho(self,*keys):
         self.native_keys+=1
         if keys==(0x11,0x4C):self.focus='url'

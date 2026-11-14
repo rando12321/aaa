@@ -29,7 +29,7 @@ Mantenha esse Chrome visível, com a aba WhatsApp ativa, sem DevTools ou painel 
 
 - CSV UTF-8 com vírgula/ponto e vírgula, leitura como texto, deduplicação, exclusão de `11999999999` e versão internacional, normalização brasileira +55 sem inventar nono dígito.
 - Nomes automáticos curtos e únicos, `{name}`, várias linhas, Parar e logs por etapa.
-- O número é aberto por Ctrl+L, URL digitada e Enter **pelo Windows**. O Selenium apenas observa a transição e o resultado.
+- O número é aberto por Ctrl+L, espera de foco da barra, pausa após limpar, URL completa `https://` digitada e Enter **pelo Windows**. A pausa evita perder o primeiro caractere ao mudar o foco. O Selenium apenas observa a transição e o resultado.
 - Contato existente exige Adicionar/Editar na interface; nome de perfil não basta. Existente é pulado sem mensagem e sem espera.
 - Nome digitado e valor conferido; país/telefone precisam corresponder ao CSV. Número de outra região do histórico não comprova o telefone do formulário.
 - Se Salvar estiver fora da área rolável visível, a rolagem é feita pela roda nativa do mouse. Sem Salvar em 5 segundos ou com validação inválida antes de salvar, fecha no X, confirma Descartar e reabre uma vez pela interface, sem F5 nessa recuperação. Não repete clique em Salvar com resultado incerto.

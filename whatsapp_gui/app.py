@@ -21,7 +21,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import urlencode
 
-VERSAO = '2026.11.14-v18-selenium-leitura-acoes-windows'
+VERSAO = '2026.11.14-v19-url-com-foco-e-pausa'
 IGNORADOS = {'11999999999', '5511999999999'}
 
 class NumeroRecusado(Exception):
@@ -396,6 +396,8 @@ class DesktopWindows(TecladoWindows):
         if limpar:
             self.atalho(0x11, 0x41)
             self.atalho(0x08)
+            if parar.wait(0.2):
+                raise InterruptedError()
         for caractere in texto:
             if parar.is_set():
                 raise InterruptedError()
@@ -416,7 +418,28 @@ class DesktopWindows(TecladoWindows):
             self.atalho(0x09)
 
 
-# UI Automation COM bindings: signatures follow uiautomationclient.h.
+    def abrir_url(self, url, parar, conferir_barra=None):
+        if not url.startswith('https://web.whatsapp.com/'):
+            raise ValueError('URL de navegação inesperada.')
+        self.proteger()
+        self.atalho(0x11,0x4C)
+        # Chrome moves focus asynchronously after Ctrl+L. Do not race its omnibox.
+        if parar.wait(0.35):
+            raise InterruptedError()
+        if conferir_barra:
+            fim=time.monotonic()+3
+            while not conferir_barra():
+                if time.monotonic()>=fim:
+                    raise RuntimeError('A barra de endereço não recebeu foco. Nenhum caractere da URL foi enviado.')
+                if parar.wait(0.05):
+                    raise InterruptedError()
+        self.escrever(url,parar,conferir_foco=conferir_barra)
+        if parar.wait(0.2):
+            raise InterruptedError()
+        self.atalho(0x0D)
+
+
+# Native Windows rectangle/point structures.
 
 
 class RECT(ctypes.Structure):
@@ -600,6 +623,10 @@ class LeitorSelenium:
         if not data:
             raise NativeUIError('Controle saiu da tela: '+elemento.nome)
         return self.elemento(data,self.viewport())
+
+    def barra_endereco_focada(self):
+        # Read-only check: after native Ctrl+L the page itself must lose focus.
+        return bool(self.executar_leitura('return !document.hasFocus();'))
 
     def focused(self, elemento):
         return bool(self.executar_leitura('return document.hasFocus() && (document.activeElement===arguments[0] || arguments[0].contains(document.activeElement));',elemento.nativo))
@@ -821,9 +848,8 @@ class TelaNativa:
 
     def abrir_numero(self, numero):
         self.numero_atual = numero
-        self.desktop.atalho(0x11, 0x4C)
-        self.desktop.escrever('https://web.whatsapp.com/send?' + urlencode({'phone':numero}), self.parar)
-        self.desktop.atalho(0x0D)
+        self.desktop.abrir_url('https://web.whatsapp.com/send?' + urlencode({'phone':numero}),self.parar,
+                               getattr(self.client,'barra_endereco_focada',None))
         def saiu():
             try:
                 return self.campo_mensagem() is None
@@ -1320,9 +1346,7 @@ class App:
                 escolhida=tela.aguardar(janela_criada,10,'vincular a nova janela criada pelo Selenium')
                 desktop.vincular(escolhida['hwnd'],escolhida['pid'])
                 tela.conectar()
-                desktop.atalho(0x11,0x4C)
-                desktop.escrever('https://web.whatsapp.com/',self.parar)
-                desktop.atalho(0x0D)
+                desktop.abrir_url('https://web.whatsapp.com/',self.parar,tela.client.barra_endereco_focada)
                 self.driver=tela
                 self.log('Chrome vinculado por janela/processo. Selenium só lê; clique, rolagem e teclas usam SendInput. Faça login por QR e aguarde as conversas antes de Iniciar.')
             except Exception:

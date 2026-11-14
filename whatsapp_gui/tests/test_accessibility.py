@@ -95,6 +95,11 @@ class FakeDesktop:
             self.draft=''
         elif name=='OK':self.state='chat';self.refuse=False
 
+    def abrir_url(self,url,parar,conferir_barra=None):
+        self.atalho(0x11,0x4C)
+        self.escrever(url,parar)
+        self.atalho(0x0D)
+
     def atalho(self,*keys):
         if keys==(0x11,0x4C):self.focus='url'
         elif keys==(0x0D,):self.loading=True;self.state='refused' if self.refuse else 'chat';self.toast=False

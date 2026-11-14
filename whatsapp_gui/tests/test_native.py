@@ -111,3 +111,35 @@ class NativeKeyboardTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'Windows não colocou'):
                 teclado.ativar('WhatsApp')
         teclado.api.SendInput.assert_not_called()
+
+    def test_url_waits_for_omnibox_and_clear_before_first_h(self):
+        from app import DesktopWindows
+        base=self.keyboard()
+        desktop=DesktopWindows.__new__(DesktopWindows)
+        desktop.__dict__.update(base.__dict__)
+        eventos=[]
+        def send(count,entries,size):
+            for e in entries:
+                if e.ki.dwFlags==4:eventos.append(('char',chr(e.ki.wScan)))
+            return count
+        desktop.api.SendInput.side_effect=send
+        parar=Mock();parar.is_set.return_value=False
+        parar.wait.side_effect=lambda seconds:eventos.append(('wait',seconds)) or False
+        desktop.abrir_url('https://web.whatsapp.com/',parar,lambda:True)
+        caracteres=''.join(value for tipo,value in eventos if tipo=='char')
+        self.assertEqual(caracteres,'https://web.whatsapp.com/')
+        primeiro_h=eventos.index(('char','h'))
+        self.assertIn(('wait',.35),eventos[:primeiro_h])
+        self.assertIn(('wait',.2),eventos[:primeiro_h])
+
+    def test_stop_during_address_focus_wait_sends_no_url(self):
+        from app import DesktopWindows
+        base=self.keyboard()
+        desktop=DesktopWindows.__new__(DesktopWindows)
+        desktop.__dict__.update(base.__dict__)
+        parar=Mock();parar.wait.return_value=True
+        with self.assertRaises(InterruptedError):
+            desktop.abrir_url('https://web.whatsapp.com/',parar,lambda:True)
+        # Ctrl+L only; no Unicode URL packet and no Enter.
+        self.assertEqual(len(desktop.events),1)
+        self.assertTrue(all(scan==0 for _,scan,_ in desktop.events[0]))
