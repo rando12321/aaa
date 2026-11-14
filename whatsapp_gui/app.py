@@ -26,7 +26,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-VERSAO = 'V22-envio-direto-com-enviados-txt'
+VERSAO = 'V23-envio-direto-texto-unicode'
 ARQUIVO_ENVIADOS = Path(__file__).resolve().parent / 'enviados.txt'
 
 IGNORADOS = {"11999999999", "5511999999999"}
@@ -167,6 +167,32 @@ def ler_csv(caminho):
         )
 
     return contatos, ignorados
+
+
+SCRIPT_TEXTO_MENSAGEM = r"""
+function textoMensagem(node) {
+    if (node.nodeType===Node.TEXT_NODE) return node.nodeValue||'';
+    if (node.nodeType!==Node.ELEMENT_NODE) return '';
+    if (node.tagName==='IMG') return node.getAttribute('alt')||'';
+    if (node.tagName==='BR') return '\n';
+    let result='';
+    const children=[...node.childNodes];
+    for(let i=0;i<children.length;i++){
+        const child=children[i];
+        const block=child.nodeType===Node.ELEMENT_NODE && /^(P|DIV)$/.test(child.tagName);
+        if(block && result && !result.endsWith('\n')) result+='\n';
+        result+=textoMensagem(child);
+        if(block && i<children.length-1 && !result.endsWith('\n')) result+='\n';
+    }
+    return result;
+}
+"""
+
+
+def normalizar_mensagem(texto):
+    texto=unicodedata.normalize('NFC',texto.replace('\r\n','\n').replace('\r','\n'))
+    # Editor representation only. Keep ZWJ/variation selectors and internal lines.
+    return texto.replace('\u00a0',' ').replace('\u202f',' ').replace('\u200b','').replace('\ufeff','').rstrip('\n')
 
 
 class HistoricoTXT:
@@ -565,38 +591,47 @@ class App:
             raise RuntimeError('A conversa atual não foi aberta para este número.')
         self.definir_etapa('Preparando a mensagem na conversa aberta...')
         campo=self.esperar(self.campo_mensagem)
-        if (campo.get_attribute('textContent') or '').strip():
+        if self.ler_mensagem(campo).strip():
             raise RuntimeError('Existe um rascunho. Não será apagado ou misturado.')
         anteriores=self.mensagens_saida()
         texto=texto.replace('\r\n','\n').replace('\r','\n')
         campo.click()
-        for indice,linha in enumerate(texto.split('\n')):
-            self.conferir_parada()
-            if indice:campo.send_keys(Keys.SHIFT,Keys.ENTER)
-            if linha:campo.send_keys(linha)
-        digitado=self.driver.execute_script('return arguments[0].innerText;',campo)
-        if digitado.replace('\r\n','\n')!=texto:
-            raise RuntimeError('O texto digitado não corresponde à mensagem. Envio bloqueado.')
+        self.conferir_parada()
+        self.driver.execute_cdp_cmd('Input.insertText',{'text':texto})
+        esperado=normalizar_mensagem(texto)
+        lido=['']
+        self.definir_etapa('Conferindo a mensagem inserida, incluindo linhas e emojis...')
+        def conferir(driver):
+            lido[0]=self.ler_mensagem(campo)
+            return lido[0]==esperado
+        try:
+            self.esperar(conferir,5)
+        except Exception as erro:
+            raise RuntimeError(f'O texto inserido não foi confirmado. Esperado: {len(esperado)} caracteres; lido: {len(lido[0])}. Rascunho preservado, sem envio e sem registro no TXT.') from erro
         self.conferir_parada()
         self.definir_etapa('Enviando uma vez e confirmando nova mensagem de saída...')
         self.envio_incerto=True
         campo.send_keys(Keys.ENTER)
         def confirmado(driver):
-            return any(chave not in anteriores and valor==texto for chave,valor in self.mensagens_saida().items())
+            return any(chave not in anteriores and valor==esperado for chave,valor in self.mensagens_saida().items())
         try:
             self.esperar(confirmado,30)
         except Exception as erro:
             raise RuntimeError('ENVIO INCERTO: não foi confirmado e não será registrado no TXT. Confira a conversa antes de tentar novamente.') from erro
         self.log('Nova mensagem de saída confirmada; entrega não confirmada.')
 
+    def ler_mensagem(self,campo):
+        return normalizar_mensagem(self.driver.execute_script(SCRIPT_TEXTO_MENSAGEM+'return textoMensagem(arguments[0]);',campo))
+
     def mensagens_saida(self):
-        return dict(self.driver.execute_script(r"""
+        linhas=self.driver.execute_script(SCRIPT_TEXTO_MENSAGEM+r"""
             return [...document.querySelectorAll('#main .message-out')].map(e=>{
                 const row=e.closest('[data-id]')||e.querySelector('[data-id]');
-                const text=[...e.querySelectorAll('.selectable-text')].map(t=>t.innerText).join('\n').replace(/\r\n?/g,'\n');
+                const text=[...e.querySelectorAll('.selectable-text')].map(textoMensagem).join('\n');
                 return [row&&row.getAttribute('data-id'),text];
             }).filter(([id])=>id);
-        """))
+        """)
+        return {chave:normalizar_mensagem(texto) for chave,texto in linhas}
 
     def aguardar_proximo(self, base):
         extra = random.randint(60, 180)

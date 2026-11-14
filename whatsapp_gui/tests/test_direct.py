@@ -107,7 +107,7 @@ class BatchTests(unittest.TestCase):
         self.app.enviar=App.enviar.__get__(self.app,App)
         field=Mock();field.get_attribute.return_value=''
         self.app.campo_mensagem=Mock(return_value=field)
-        self.app.driver.execute_script.return_value='Olá, Ana!'
+        self.app.driver.execute_script.side_effect=['','Olá, Ana!']
         self.app.mensagens_saida=Mock(side_effect=[{},outgoing])
         def wait(fn,seconds=30):
             value=fn(self.app.driver)
@@ -133,7 +133,36 @@ class BatchTests(unittest.TestCase):
         texto='Olá, Ana!\nSegunda linha'
         field=self.setup_actual_send({'new-id':texto})
         self.app.mensagem.get.return_value='Olá, {name}!\nSegunda linha'
-        self.app.driver.execute_script.return_value=texto
+        self.app.driver.execute_script.side_effect=['',texto]
         self.run_batch()
-        self.assertTrue(any(call.args==('\ue008','\ue007') for call in field.send_keys.call_args_list))
+        self.app.driver.execute_cdp_cmd.assert_called_once_with('Input.insertText',{'text':texto})
         self.assertEqual(self.app.historico.ler(),{'5593984108321'})
+
+    def test_missing_text_still_blocks_send_and_txt_record(self):
+        field=self.setup_actual_send({'new-id':'Olá, Ana!'})
+        self.app.driver.execute_script.side_effect=['','Olá']
+        with self.assertRaisesRegex(RuntimeError,'texto inserido não foi confirmado'):
+            self.run_batch()
+        field.send_keys.assert_not_called()
+        self.assertEqual(self.app.historico.ler(),set())
+
+    def test_emoji_only_draft_is_not_overwritten(self):
+        field=self.setup_actual_send({})
+        self.app.driver.execute_script.side_effect=['😀']
+        with self.assertRaisesRegex(RuntimeError,'rascunho'):
+            self.run_batch()
+        self.app.driver.execute_cdp_cmd.assert_not_called()
+        field.send_keys.assert_not_called()
+        self.assertEqual(self.app.historico.ler(),set())
+
+
+class MessageNormalizationTests(unittest.TestCase):
+    def test_ui_spaces_and_line_endings(self):
+        self.assertEqual(modulo.normalizar_mensagem('Olá\u00a0Ana\r\nLinha 2\n'),'Olá Ana\nLinha 2')
+
+    def test_emoji_joiners_and_internal_blank_lines_preserved(self):
+        text='Olá 👩\u200d💻!\n\nSegunda linha'
+        self.assertEqual(modulo.normalizar_mensagem(text),text)
+
+    def test_missing_or_changed_words_are_not_equal(self):
+        self.assertNotEqual(modulo.normalizar_mensagem('Olá Ana'),modulo.normalizar_mensagem('Olá'))

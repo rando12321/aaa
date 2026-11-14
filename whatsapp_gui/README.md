@@ -23,6 +23,8 @@ O arquivo é criado automaticamente **na mesma pasta do `app.py`**, mesmo que o 
 
 Antes de abrir cada conversa, o aplicativo lê o TXT e pula números já registrados **sem envio e sem espera**. O histórico persiste após fechar/reabrir o programa. Números formatados ou nacionais colocados manualmente no TXT são normalizados na leitura; linha inválida interrompe antes de enviar para evitar ignorar um histórico corrompido.
 
+A mensagem é inserida inteira pelo evento de texto do Chrome (`Input.insertText`), suportando Unicode e várias linhas sem pressionar Enter entre as linhas. A leitura do editor considera emojis em imagens, espaços não separáveis e quebras finais do DOM; preserva palavras, caracteres de composição de emojis e linhas internas. Diferença real ou texto faltando continua bloqueando o envio.
+
 O número só é acrescentado ao arquivo depois de observar uma **nova mensagem de saída com identificador e texto correspondentes**. Campo vazio sozinho não comprova envio. O arquivo é descarregado e sincronizado em disco após cada registro; não é preciso esperar acabar o lote. Não significa confirmação de entrega ao destinatário.
 
 Recusa do WhatsApp, falha ou resultado incerto não entram no TXT. Se o envio ficar incerto ou se falhar a gravação depois de enviar, o lote interrompe e novas tentativas ficam bloqueadas nessa sessão. **Antes de reiniciar, confira a conversa:** se foi enviado, coloque o número em `enviados.txt` manualmente. Não apague o histórico para retomar; isso permite reenviar aos números removidos. Use uma única instância do programa por pasta/histórico.
