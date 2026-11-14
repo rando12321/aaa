@@ -1,3 +1,4 @@
+import queue
 import ast
 import ctypes
 import sys
@@ -165,6 +166,7 @@ class FlowTests(unittest.TestCase):
         original=self.tela.aguardar
         self.tela.aguardar=lambda fn,segundos,etapa:original(fn,min(segundos,.5),etapa)
         self.app=App.__new__(App)
+        self.app.eventos=queue.Queue()
         self.app.driver=self.tela
         self.app.parar=self.tela.parar
         self.app.log=Mock()

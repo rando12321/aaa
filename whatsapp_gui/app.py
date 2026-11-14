@@ -21,7 +21,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import urlencode
 
-VERSAO = '2026.11.14-v20-verificar-dados-e-menu-interno'
+VERSAO = '2026.11.14-v21-navegacao-sem-espera-cega'
 IGNORADOS = {'11999999999', '5511999999999'}
 
 class NumeroRecusado(Exception):
@@ -551,7 +551,7 @@ const show = e => {
  const edit=e.matches('input:not([type=hidden]), textarea, [contenteditable=true][role=textbox]');
  const outgoing=e.matches('.message-out');
  const role=e.getAttribute('role')||'';
- let kind=edit?50004:(outgoing?50026:(role==='menuitem'?50011:(e.matches('button,[role=button],[tabindex="0"]')?50000:(e.matches('select,[role=combobox]')?50003:50020))));
+ let kind=edit?50004:(outgoing?50026:(role==='menuitem'?50011:(e.matches('button,[role=button],[tabindex]')?50000:(e.matches('select,[role=combobox]')?50003:50020))));
  let name=e.getAttribute('aria-label')||'';
  if (!name && e.getAttribute('aria-labelledby')) name=e.getAttribute('aria-labelledby').split(/\s+/).map(id=>document.getElementById(id)?.innerText||'').join(' ');
  if (!name && edit) name=[...(e.labels||[])].map(l=>l.innerText).join(' ')||e.getAttribute('placeholder')||'';
@@ -564,6 +564,8 @@ const show = e => {
  if (!name.trim() && /^(check|checkmark|checkmark-medium|done|save)$/.test(icon)
      && r.top>innerHeight*.6 && !e.closest('label,[data-testid*=phone],[data-testid*=input]')) name='Salvar';
  if (outgoing) name='Você: '+[...e.querySelectorAll('.selectable-text')].map(t=>t.innerText).join('\n');
+ if(!edit && kind===50020 && /^(adicionar aos contatos|adicionar a contatos|adicionar aos contactos|adicionar contato|add to contacts|add contact|editar contato|editar contacto|edit contact|dados do contato|dados do contacto|informacoes do contato|contact info|editar|edit)$/.test(name.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim())
+    && (e.closest('[role=menu],[data-animate-dropdown-menu=true],[data-testid*=menu],[data-testid*=drawer]')||getComputedStyle(e).cursor==='pointer'))kind=50011;
  const value=edit ? (e.matches('input,textarea')?e.value:e.innerText) : null;
  let clipped=false;
  const cx=(r.left+r.right)/2,cy=(r.top+r.bottom)/2;
@@ -579,7 +581,15 @@ const show = e => {
   help:e.getAttribute('title')||'',aria:'invalid:'+e.getAttribute('aria-invalid')};
 };
 if (only) return show(only);
-const items=new Set(scope.querySelectorAll('button,[role=button],[role=menuitem],[tabindex="0"],input:not([type=hidden]),textarea,[contenteditable=true][role=textbox],select,[role=combobox],.message-out,[role=heading],[role=alert],[role=status],[role=dialog],[role=alertdialog],[data-animate-modal-popup=true],[data-testid=popup-contents]'));
+const items=new Set(scope.querySelectorAll('button,[role=button],[role=menuitem],[tabindex],input:not([type=hidden]),textarea,[contenteditable=true][role=textbox],select,[role=combobox],.message-out,[role=heading],[role=alert],[role=status],[role=dialog],[role=alertdialog],[data-animate-modal-popup=true],[data-testid=popup-contents]'));
+const norm=t=>(t||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+const actionLabels=new Set(['adicionar aos contatos','adicionar a contatos','adicionar aos contactos','adicionar contato','add to contacts','add contact','editar contato','editar contacto','edit contact','dados do contato','dados do contacto','informacoes do contato','contact info','editar','edit']);
+for(const leaf of scope.querySelectorAll('span,div,li')){
+ if(leaf.children.length || !actionLabels.has(norm(leaf.innerText)) || leaf.closest('#side,#pane-side,#main header,.message-in,.message-out'))continue;
+ const target=leaf.closest('button,[role=button],[role=menuitem],[tabindex],li')||leaf;
+ const context=leaf.closest('[role=menu],[data-animate-dropdown-menu=true],[data-testid*=menu],[data-testid*=drawer]');
+ if(context || getComputedStyle(target).cursor==='pointer')items.add(target);
+}
 // Visible phone/contact headings may be plain spans rather than semantic headings.
 for (const e of scope.querySelectorAll('span,label,h1,h2,h3')) {
  if (!e.children.length && /^(Novo contato|New contact|Criar contato|\+?55[\d\s().-]{10,})$/i.test((e.innerText||'').trim())) items.add(e);
@@ -597,6 +607,9 @@ class LeitorSelenium:
             return self.driver.execute_script(script,*args)
         except Exception as erro:
             raise NativeUIError('Falha na leitura da página pelo Selenium: '+str(erro)) from erro
+
+    def estado_pagina(self):
+        return self.executar_leitura('return {documento:performance.timeOrigin,url:location.href,pronto:document.readyState};')
 
     def viewport(self):
         m=self.executar_leitura('return {w:innerWidth,h:innerHeight,dpr:devicePixelRatio};')
@@ -778,7 +791,10 @@ class TelaNativa:
             raise InterruptedError()
 
     def aguardar(self, funcao, segundos, etapa):
-        fim = time.monotonic() + segundos
+        inicio=time.monotonic()
+        fim=inicio+segundos
+        proximo_aviso=inicio+2
+        self.log(f'Aguardando: {etapa} (até {segundos:g}s).')
         ultimo = ''
         while time.monotonic() < fim:
             self.conferir_parada()
@@ -788,6 +804,10 @@ class TelaNativa:
                     return resultado
             except NativeUIError as erro:
                 ultimo = str(erro)
+            agora=time.monotonic()
+            if agora>=proximo_aviso:
+                self.log(f'Em andamento: {etapa} — {agora-inicio:.0f}s.' + (' Última leitura: '+ultimo if ultimo else ''))
+                proximo_aviso=agora+2
             if self.parar.wait(0.2):
                 raise InterruptedError()
         raise TimeoutError('Tempo esgotado: ' + etapa + ('. ' + ultimo if ultimo else ''))
@@ -918,20 +938,33 @@ class TelaNativa:
 
     def abrir_numero(self, numero):
         self.numero_atual = numero
+        documento_anterior=self.client.estado_pagina()['documento'] if hasattr(self.client,'estado_pagina') else None
         self.desktop.abrir_url('https://web.whatsapp.com/send?' + urlencode({'phone':numero}),self.parar,
                                getattr(self.client,'barra_endereco_focada',None))
-        def saiu():
-            try:
-                return self.campo_mensagem() is None
-            except NativeUIError:
-                return True
-        self.aguardar(saiu, 15, 'a conversa anterior sair da tela')
+        if documento_anterior is None:
+            # Legacy test providers do not expose a browser document identifier.
+            def saiu():
+                try:
+                    return self.campo_mensagem() is None
+                except NativeUIError:
+                    return True
+            self.aguardar(saiu,15,'a conversa anterior sair da tela')
         def resposta():
-            elementos = self.snapshot()
+            if documento_anterior is not None:
+                estado=self.client.estado_pagina()
+                if estado['documento']==documento_anterior:
+                    return False
+                from urllib.parse import urlsplit
+                host=urlsplit(estado['url']).hostname
+                if host!='web.whatsapp.com':
+                    if estado['pronto']=='complete':
+                        raise RuntimeError('A navegação não abriu web.whatsapp.com. Nenhum contato será processado nessa página.')
+                    return False
+            elementos=self.snapshot()
             if self.aviso_recusa(elementos):
                 return 'recusado'
             return 'conversa' if self.campo_mensagem(elementos) else False
-        return self.aguardar(resposta, 90, 'abrir destinatário pela leitura Selenium')
+        return self.aguardar(resposta,90,'confirmar nova página e destinatário aberto')
 
     def telefone_confirmado(self, numero, elementos=None):
         elementos = self.snapshot() if elementos is None else elementos
@@ -1127,11 +1160,14 @@ class App:
 
 
     def log(self, texto):
+        if texto.startswith('Aguardando: '):
+            self.eventos.put(('status',texto[len('Aguardando: '):]))
         self.eventos.put(("log", texto))
 
 
     def definir_etapa(self, texto):
         self.etapa = texto
+        self.eventos.put(('status',texto))
         self.log(texto)
 
 
@@ -1342,8 +1378,11 @@ class App:
             while True:
                 tipo, valor = self.eventos.get_nowait()
 
-                if tipo == "fim":
+                if tipo == 'status':
+                    self.status.set(valor)
+                elif tipo == "fim":
                     self.ocupado = False
+                    self.status.set('Processamento encerrado. Consulte o registro.')
 
                     for botao in self.botoes:
                         botao.configure(state="normal")
@@ -1399,12 +1438,15 @@ class App:
             desktop=DesktopWindows()
             anteriores={w['hwnd'] for w in desktop.listar_janelas()}
             opcoes=webdriver.ChromeOptions()
+            opcoes.page_load_strategy='none'
             perfil=Path.home()/'.whatsapp_csv_sender'/'chrome_native_hybrid'
             opcoes.add_argument('--user-data-dir='+str(perfil))
             if os.environ.get('WHATSAPP_CHROME'):
                 opcoes.binary_location=os.environ['WHATSAPP_CHROME']
             raw=webdriver.Chrome(service=Service(executable_path=localizar_chromedriver()),options=opcoes)
             try:
+                raw.set_page_load_timeout(15)
+                raw.set_script_timeout(5)
                 tela=TelaNativa(self.parar,self.log,desktop=desktop,client=LeitorSelenium(raw,desktop))
                 pid=raw.capabilities.get('goog:processID')
                 def janela_criada():

@@ -1,3 +1,4 @@
+import queue
 import importlib.util
 import tempfile
 import threading
@@ -135,7 +136,7 @@ class DOMTests(unittest.TestCase):
         self.desktop=NativeDesktopFixture(self.page,self.raw)
         self.leitor=LeitorSelenium(self.raw,self.desktop)
         self.tela=TelaNativa(threading.Event(),lambda t:None,desktop=self.desktop,client=self.leitor)
-        self.app=App.__new__(App);self.app.driver=self.tela;self.app.parar=self.tela.parar;self.app.log=Mock();self.app.cadastro_confirmado=None;self.app.envio_pendente=None
+        self.app=App.__new__(App);self.app.eventos=queue.Queue();self.app.driver=self.tela;self.app.parar=self.tela.parar;self.app.log=Mock();self.app.cadastro_confirmado=None;self.app.envio_pendente=None
         self.contact={'phone':'5593984108321','name':'Ana 1234'}
     def tearDown(self):self.context.close()
     def test_reader_does_not_trigger_input_or_change_page(self):
@@ -204,3 +205,39 @@ class DOMTests(unittest.TestCase):
             self.app.abrir_e_detectar(self.contact['phone'])
         self.assertIsNone(self.page.evaluate('window.sent'))
         self.assertIsNone(self.page.evaluate('localStorage.saved'))
+
+    def test_navigation_ready_even_if_empty_conversation_frame_was_missed(self):
+        original=self.desktop.abrir_url
+        def immediately_ready(*args,**kwargs):
+            original(*args,**kwargs)
+            self.raw.loading=False  # The conversation never appears empty to the reader.
+        self.desktop.abrir_url=immediately_ready
+        self.assertTrue(self.app.abrir_e_detectar(self.contact['phone']))
+
+    def test_same_document_is_not_accepted_as_new_recipient(self):
+        self.desktop.abrir_url=lambda *args,**kwargs:None  # Native navigation did not occur.
+        original=self.tela.aguardar
+        self.tela.aguardar=lambda fn,seconds,stage:original(fn,min(seconds,.5),stage)
+        with self.assertRaisesRegex(TimeoutError,'nova página'):
+            self.app.abrir_e_detectar(self.contact['phone'])
+        self.assertIsNone(self.page.evaluate('window.sent'))
+
+    def test_saved_contact_menu_div_without_button_role_is_detected(self):
+        html=HTML.replace('<div id="menu" role="menu"', '<div id="menu" data-animate-dropdown-menu="true"')
+        html=html.replace('<button id="action" role="menuitem"','<div id="action" tabindex="-1"')
+        html=html.replace('Adicionar aos contatos</button></div>','Adicionar aos contatos</div></div>')
+        self.page.unroute('https://web.whatsapp.com/**')
+        self.page.route('https://web.whatsapp.com/**',lambda route:route.fulfill(body=html,content_type='text/html; charset=utf-8'))
+        self.page.evaluate("localStorage.saved='yes'")
+        self.assertFalse(self.app.abrir_e_detectar(self.contact['phone']))
+        self.assertIsNone(self.page.evaluate('window.sent'))
+
+    def test_saved_contact_plain_menu_text_without_tabindex_is_detected(self):
+        html=HTML.replace('<div id="menu" role="menu"', '<div id="menu" data-animate-dropdown-menu="true"')
+        html=html.replace('<button id="action" role="menuitem"','<div id="action" style="cursor:pointer"')
+        html=html.replace('Adicionar aos contatos</button></div>','Adicionar aos contatos</div></div>')
+        self.page.unroute('https://web.whatsapp.com/**')
+        self.page.route('https://web.whatsapp.com/**',lambda route:route.fulfill(body=html,content_type='text/html; charset=utf-8'))
+        self.page.evaluate("localStorage.saved='yes'")
+        self.assertFalse(self.app.abrir_e_detectar(self.contact['phone']))
+        self.assertIsNone(self.page.evaluate('window.sent'))
