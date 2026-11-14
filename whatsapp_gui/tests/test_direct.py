@@ -155,6 +155,23 @@ class BatchTests(unittest.TestCase):
         field.send_keys.assert_not_called()
         self.assertEqual(self.app.historico.ler(),set())
 
+    def test_matching_draft_is_sent_without_reinsertion_and_recorded(self):
+        field=self.setup_actual_send({'new-id':'Olá, Ana!'})
+        self.app.driver.execute_script.side_effect=['Olá, Ana!']
+        self.run_batch()
+        self.app.driver.execute_cdp_cmd.assert_not_called()
+        field.send_keys.assert_called_once_with('\ue007')
+        self.assertEqual(self.app.historico.ler(),{'5593984108321'})
+
+    def test_different_draft_is_not_sent_or_recorded(self):
+        field=self.setup_actual_send({})
+        self.app.driver.execute_script.side_effect=['Texto de outro rascunho']
+        with self.assertRaisesRegex(RuntimeError,'rascunho diferente'):
+            self.run_batch()
+        self.app.driver.execute_cdp_cmd.assert_not_called()
+        field.send_keys.assert_not_called()
+        self.assertEqual(self.app.historico.ler(),set())
+
 
 class MessageNormalizationTests(unittest.TestCase):
     def test_ui_spaces_and_line_endings(self):

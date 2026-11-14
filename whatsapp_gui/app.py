@@ -26,7 +26,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-VERSAO = 'V23-envio-direto-texto-unicode'
+VERSAO = 'V24-reutilizar-rascunho-correto'
 ARQUIVO_ENVIADOS = Path(__file__).resolve().parent / 'enviados.txt'
 
 IGNORADOS = {"11999999999", "5511999999999"}
@@ -591,23 +591,27 @@ class App:
             raise RuntimeError('A conversa atual não foi aberta para este número.')
         self.definir_etapa('Preparando a mensagem na conversa aberta...')
         campo=self.esperar(self.campo_mensagem)
-        if self.ler_mensagem(campo).strip():
-            raise RuntimeError('Existe um rascunho. Não será apagado ou misturado.')
-        anteriores=self.mensagens_saida()
         texto=texto.replace('\r\n','\n').replace('\r','\n')
-        campo.click()
-        self.conferir_parada()
-        self.driver.execute_cdp_cmd('Input.insertText',{'text':texto})
         esperado=normalizar_mensagem(texto)
-        lido=['']
-        self.definir_etapa('Conferindo a mensagem inserida, incluindo linhas e emojis...')
-        def conferir(driver):
-            lido[0]=self.ler_mensagem(campo)
-            return lido[0]==esperado
-        try:
-            self.esperar(conferir,5)
-        except Exception as erro:
-            raise RuntimeError(f'O texto inserido não foi confirmado. Esperado: {len(esperado)} caracteres; lido: {len(lido[0])}. Rascunho preservado, sem envio e sem registro no TXT.') from erro
+        rascunho=self.ler_mensagem(campo)
+        if rascunho.strip() and rascunho!=esperado:
+            raise RuntimeError('Existe um rascunho diferente da mensagem configurada. Não será apagado ou misturado.')
+        campo.click()
+        if rascunho==esperado:
+            self.log('O rascunho já contém a mensagem correta. Enviando sem redigitar.')
+        else:
+            self.conferir_parada()
+            self.driver.execute_cdp_cmd('Input.insertText',{'text':texto})
+            lido=['']
+            self.definir_etapa('Conferindo a mensagem inserida, incluindo linhas e emojis...')
+            def conferir(driver):
+                lido[0]=self.ler_mensagem(campo)
+                return lido[0]==esperado
+            try:
+                self.esperar(conferir,5)
+            except Exception as erro:
+                raise RuntimeError(f'O texto inserido não foi confirmado. Esperado: {len(esperado)} caracteres; lido: {len(lido[0])}. Rascunho preservado, sem envio e sem registro no TXT.') from erro
+        anteriores=self.mensagens_saida()
         self.conferir_parada()
         self.definir_etapa('Enviando uma vez e confirmando nova mensagem de saída...')
         self.envio_incerto=True

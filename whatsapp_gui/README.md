@@ -23,7 +23,9 @@ O arquivo é criado automaticamente **na mesma pasta do `app.py`**, mesmo que o 
 
 Antes de abrir cada conversa, o aplicativo lê o TXT e pula números já registrados **sem envio e sem espera**. O histórico persiste após fechar/reabrir o programa. Números formatados ou nacionais colocados manualmente no TXT são normalizados na leitura; linha inválida interrompe antes de enviar para evitar ignorar um histórico corrompido.
 
-A mensagem é inserida inteira pelo evento de texto do Chrome (`Input.insertText`), suportando Unicode e várias linhas sem pressionar Enter entre as linhas. A leitura do editor considera emojis em imagens, espaços não separáveis e quebras finais do DOM; preserva palavras, caracteres de composição de emojis e linhas internas. Diferença real ou texto faltando continua bloqueando o envio.
+Se o campo já contiver um rascunho igual à mensagem configurada, ele é reutilizado: o programa clica no campo e pressiona Enter uma única vez, sem inserir o texto novamente. Um rascunho diferente continua preservado e bloqueia o envio.
+
+Quando o campo está vazio, a mensagem é inserida inteira pelo evento de texto do Chrome (`Input.insertText`), suportando Unicode e várias linhas sem pressionar Enter entre as linhas. A leitura do editor considera emojis em imagens, espaços não separáveis e quebras finais do DOM; preserva palavras, caracteres de composição de emojis e linhas internas. Diferença real ou texto faltando continua bloqueando o envio.
 
 O número só é acrescentado ao arquivo depois de observar uma **nova mensagem de saída com identificador e texto correspondentes**. Campo vazio sozinho não comprova envio. O arquivo é descarregado e sincronizado em disco após cada registro; não é preciso esperar acabar o lote. Não significa confirmação de entrega ao destinatário.
 

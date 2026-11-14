@@ -53,3 +53,16 @@ class MessageDOMTests(unittest.TestCase):
         self.assertEqual(self.page.evaluate('window.sent'),1)
         self.assertEqual(self.page.evaluate('window.lastSentText'),text)
         self.assertEqual(self.app.mensagens_saida(),{'new-id':normalizar_mensagem(text)})
+
+    def test_matching_existing_draft_sends_once_without_inserting_again(self):
+        self.page.set_content(r"""<div id="main"><div id="messages"></div><footer><div id="editor" contenteditable="true" role="textbox">Olá, Ana!</div></footer></div>
+        <script>editor.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();const row=document.createElement('div');row.className='message-out';row.dataset.id='draft-sent';const text=document.createElement('span');text.className='selectable-text';text.innerText=editor.textContent;row.append(text);messages.append(row);editor.replaceChildren();window.sent=(window.sent||0)+1;}});</script>""")
+        self.field.click.side_effect=lambda:self.page.locator('#editor').click()
+        self.field.send_keys.side_effect=lambda key:self.page.keyboard.press('Enter')
+        self.app.campo_mensagem=Mock(return_value=self.field)
+        self.app.driver.execute_cdp_cmd.side_effect=AssertionError('Não deve redigitar o rascunho correto')
+        self.app.numero_atual='5593984108321';self.app.envio_incerto=False
+        self.app.enviar({'phone':self.app.numero_atual,'name':'Ana'},'Olá, Ana!')
+        self.assertEqual(self.page.evaluate('window.sent'),1)
+        self.app.driver.execute_cdp_cmd.assert_not_called()
+        self.assertEqual(self.app.mensagens_saida(),{'draft-sent':'Olá, Ana!'})
