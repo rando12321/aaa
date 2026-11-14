@@ -1,2 +1,2 @@
-# Componente já existente necessário ao modo híbrido. O script não instala nada.
+# Selenium usado pelo script anexado; sem novas bibliotecas de automação.
 selenium==4.38.0
