@@ -1,7 +1,7 @@
-"""WhatsApp — script único com biblioteca padrão do Python.
-Windows 10/11, Python 3.12+, Chrome normal com UI Automation disponível.
-Não requer pip, OpenCV, Selenium, OCR externo ou calibração. Execute python app.py.
-A integração real no Windows/WhatsApp precisa de validação; não há garantia de indetectabilidade.
+"""WhatsApp híbrido: Selenium lê; Windows envia cliques, rolagem e teclas.
+Script único para Windows. Requer Selenium/ChromeDriver já disponíveis.
+Nenhuma instalação/download automático, OpenCV, calibração ou alteração de eventos DOM.
+O Chrome iniciado pelo Selenium ainda pode ser identificável. Validar no Windows real.
 """
 import csv
 import ctypes
@@ -15,14 +15,13 @@ import threading
 import time
 import tkinter as tk
 import unicodedata
-import weakref
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import urlencode
 
-VERSAO = '2026.11.13-v17-python-puro-acessibilidade-windows'
+VERSAO = '2026.11.14-v18-selenium-leitura-acoes-windows'
 IGNORADOS = {'11999999999', '5511999999999'}
 
 class NumeroRecusado(Exception):
@@ -212,27 +211,93 @@ class TecladoWindows:
         self.api.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
         self.api.SendInput.argtypes = [ctypes.c_uint32, ctypes.POINTER(self.INPUT), ctypes.c_int]
         self.api.SendInput.restype = ctypes.c_uint32
+        self.api.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        self.api.IsIconic.argtypes = [ctypes.c_void_p]
+        self.api.GetClientRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(RECT)]
+        self.api.ClientToScreen.argtypes = [ctypes.c_void_p, ctypes.POINTER(POINT)]
+        try:
+            self.api.GetDpiForWindow.argtypes = [ctypes.c_void_p]
+            self.api.GetDpiForWindow.restype = ctypes.c_uint32
+        except AttributeError:
+            pass
         self.janela = None
+        self.pid = None
 
-    def ativar(self, marcador):
-        encontrados = []
+    def listar_janelas(self):
+        encontrados=[]
         @self.enum_callback
-        def janela(hwnd, extra):
-            titulo = self.ctypes.create_unicode_buffer(1024)
-            classe = self.ctypes.create_unicode_buffer(256)
-            self.api.GetWindowTextW(hwnd, titulo, len(titulo))
-            self.api.GetClassNameW(hwnd, classe, len(classe))
-            if self.api.IsWindowVisible(hwnd) and classe.value.startswith('Chrome_WidgetWin') and marcador in titulo.value:
-                encontrados.append(hwnd)
+        def coletar(hwnd,extra):
+            titulo=self.ctypes.create_unicode_buffer(1024)
+            classe=self.ctypes.create_unicode_buffer(256)
+            self.api.GetWindowTextW(hwnd,titulo,len(titulo))
+            self.api.GetClassNameW(hwnd,classe,len(classe))
+            if self.api.IsWindowVisible(hwnd) and classe.value.startswith('Chrome_WidgetWin') and titulo.value.strip():
+                pid=self.ctypes.c_uint32()
+                self.api.GetWindowThreadProcessId(hwnd,self.ctypes.byref(pid))
+                encontrados.append({'hwnd':hwnd,'pid':pid.value,'titulo':titulo.value})
             return 1
-        self.api.EnumWindows(janela, 0)
-        if len(encontrados) != 1:
-            return False
-        self.janela = encontrados[0]
-        if not self.em_primeiro_plano():
-            self.api.ShowWindow(self.janela, 9)
-            self.api.SetForegroundWindow(self.janela)
-        return self.em_primeiro_plano()
+        self.api.EnumWindows(coletar,0)
+        return encontrados
+
+    def vincular(self, hwnd, pid=None):
+        candidatos=[w for w in self.listar_janelas() if w['hwnd']==hwnd and (pid is None or w['pid']==pid)]
+        if len(candidatos)!=1:
+            raise RuntimeError('A janela selecionada do navegador foi fechada ou não está visível.')
+        self.janela=candidatos[0]['hwnd']
+        self.pid=candidatos[0]['pid']
+
+    def ativar(self, marcador='WhatsApp'):
+        janelas=self.listar_janelas()
+        if self.janela:
+            encontrados=[w for w in janelas if w['hwnd']==self.janela and (getattr(self,'pid',None) is None or w['pid']==self.pid)]
+            if not encontrados:
+                raise RuntimeError('A janela vinculada do Chrome foi fechada. Conecte novamente pelo botão Chrome / QR.')
+        else:
+            encontrados=[w for w in janelas if marcador.casefold() in w['titulo'].casefold()]
+            if len(encontrados)!=1:
+                return False
+            self.janela=encontrados[0]['hwnd']
+            self.pid=encontrados[0]['pid']
+        if self.em_primeiro_plano():
+            return True
+        if self.api.IsIconic(self.janela):
+            self.api.ShowWindow(self.janela,9)
+        self.api.SetForegroundWindow(self.janela)
+        fim=time.monotonic()+3
+        while time.monotonic()<fim:
+            if self.em_primeiro_plano():
+                return True
+            time.sleep(.05)
+        raise RuntimeError('Windows não colocou o Chrome vinculado em primeiro plano. Clique nessa janela antes de iniciar; nenhuma tecla foi enviada.')
+
+    def client_rect(self):
+        rect=RECT();origin=POINT(0,0)
+        if not self.api.GetClientRect(self.janela,self.ctypes.byref(rect)) or not self.api.ClientToScreen(self.janela,self.ctypes.byref(origin)):
+            raise RuntimeError('Não foi possível localizar a área cliente do Chrome.')
+        return origin.x,origin.y,rect.right-rect.left,rect.bottom-rect.top
+
+    def dpi_scale(self):
+        try:
+            return self.api.GetDpiForWindow(self.janela)/96
+        except AttributeError:
+            return 1.0
+
+    def rolar(self,x,y,delta):
+        self.proteger()
+        if self.rect()!=self.rect_anterior:
+            raise RuntimeError('Janela movida antes da rolagem nativa.')
+        left,top,right,bottom=self.rect_anterior
+        if not(0<=x<right-left and 0<=y<bottom-top):
+            raise RuntimeError('Ponto de rolagem fora da janela.')
+        vx,vy=self.api.GetSystemMetrics(76),self.api.GetSystemMetrics(77)
+        vw,vh=self.api.GetSystemMetrics(78),self.api.GetSystemMetrics(79)
+        entradas=(self.INPUT*2)()
+        entradas[0].type=entradas[1].type=0
+        entradas[0].mi.dx=round((left+x-vx)*65535/(vw-1));entradas[0].mi.dy=round((top+y-vy)*65535/(vh-1))
+        entradas[0].mi.dwFlags=0x8000|0x4000|1
+        entradas[1].mi.mouseData=delta&0xffffffff;entradas[1].mi.dwFlags=0x0800
+        if self.api.SendInput(2,entradas,self.ctypes.sizeof(self.INPUT))!=2:
+            raise RuntimeError('Windows recusou a rolagem nativa.')
 
     def em_primeiro_plano(self):
         return bool(self.janela) and self.api.GetForegroundWindow() == self.janela
@@ -352,13 +417,6 @@ class DesktopWindows(TecladoWindows):
 
 
 # UI Automation COM bindings: signatures follow uiautomationclient.h.
-class GUID(ctypes.Structure):
-    _fields_ = [('d1', ctypes.c_uint32), ('d2', ctypes.c_uint16), ('d3', ctypes.c_uint16), ('d4', ctypes.c_ubyte * 8)]
-
-    @classmethod
-    def from_string(cls, value):
-        import uuid
-        return cls.from_buffer_copy(uuid.UUID(value).bytes_le)
 
 
 class RECT(ctypes.Structure):
@@ -369,40 +427,16 @@ class POINT(ctypes.Structure):
     _fields_ = [('x', ctypes.c_int32), ('y', ctypes.c_int32)]
 
 
-class VARIANT_RECORD(ctypes.Structure):
-    _fields_ = [('record', ctypes.c_void_p), ('info', ctypes.c_void_p)]
 
 
-class VARIANT_VALUE(ctypes.Union):
-    _fields_ = [('integer', ctypes.c_int32), ('boolean', ctypes.c_int16), ('real', ctypes.c_double),
-                ('pointer', ctypes.c_void_p), ('record', VARIANT_RECORD)]
 
 
-class VARIANT(ctypes.Structure):
-    _anonymous_ = ('value',)
-    _fields_ = [('vt', ctypes.c_uint16), ('r1', ctypes.c_uint16), ('r2', ctypes.c_uint16), ('r3', ctypes.c_uint16), ('value', VARIANT_VALUE)]
 
 
 class NativeUIError(RuntimeError):
     pass
 
 
-class COMPointer:
-    def __init__(self, client, pointer):
-        self.client, self.pointer = client, pointer
-        if hasattr(client, 'pointers'):
-            client.pointers.add(self)
-
-    def close(self):
-        if self.pointer and self.pointer.value:
-            self.client.method(self.pointer, 2, ctypes.c_uint32)()
-            self.pointer = ctypes.c_void_p()
-
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
 
 
 @dataclass
@@ -423,193 +457,6 @@ class Elemento:
         return not self.fora_tela and self.rect[2] > self.rect[0] and self.rect[3] > self.rect[1]
 
 
-class UIAWindows:
-    def __init__(self):
-        if not sistema_windows():
-            raise NativeUIError('Acessibilidade UI Automation requer Windows.')
-        self.pointers = weakref.WeakSet()
-        self.ole = ctypes.WinDLL('ole32', use_last_error=True)
-        self.aut = ctypes.WinDLL('oleaut32', use_last_error=True)
-        self.ole.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-        self.ole.CoInitializeEx.restype = ctypes.c_int32
-        self.ole.CoCreateInstance.argtypes = [ctypes.POINTER(GUID), ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)]
-        self.ole.CoCreateInstance.restype = ctypes.c_int32
-        self.aut.SysFreeString.argtypes = [ctypes.c_void_p]
-        resultado = self.ole.CoInitializeEx(None, 2)
-        if resultado < 0:
-            raise NativeUIError(f'Não foi possível inicializar COM: {resultado & 0xffffffff:08X}')
-        self.inicializado = True
-        pointer = ctypes.c_void_p()
-        clsid = GUID.from_string('ff48dba4-60ef-4201-aa87-54103eef594e')
-        iid = GUID.from_string('30cbe57d-d9d0-452a-ab13-7ac5ac4825ee')
-        try:
-            self.check(self.ole.CoCreateInstance(ctypes.byref(clsid), None, 1, ctypes.byref(iid), ctypes.byref(pointer)))
-            self.obj = COMPointer(self, pointer)
-        except Exception:
-            self.ole.CoUninitialize()
-            self.inicializado = False
-            raise
-
-    @staticmethod
-    def check(result):
-        if result < 0:
-            raise NativeUIError(f'Falha na acessibilidade do Windows: HRESULT {result & 0xffffffff:08X}')
-
-    def method(self, pointer, index, result=ctypes.c_int32, args=()):
-        if isinstance(pointer, COMPointer):
-            pointer = pointer.pointer
-        table = ctypes.cast(pointer, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
-        fn = ctypes.WINFUNCTYPE(result, ctypes.c_void_p, *args)(table[index])
-        return lambda *values: fn(pointer, *values)
-
-    def string(self, pointer, method):
-        value = ctypes.c_void_p()
-        self.check(self.method(pointer, method, args=(ctypes.POINTER(ctypes.c_void_p),))(ctypes.byref(value)))
-        try:
-            return ctypes.wstring_at(value) if value.value else ''
-        finally:
-            if value.value:
-                self.aut.SysFreeString(value)
-
-    def integer(self, pointer, method):
-        value = ctypes.c_int32()
-        self.check(self.method(pointer, method, args=(ctypes.POINTER(ctypes.c_int32),))(ctypes.byref(value)))
-        return value.value
-
-    def rectangle(self, pointer):
-        value = RECT()
-        self.check(self.method(pointer, 43, args=(ctypes.POINTER(RECT),))(ctypes.byref(value)))
-        return value.left, value.top, value.right, value.bottom
-
-    def root(self, hwnd):
-        pointer = ctypes.c_void_p()
-        self.check(self.method(self.obj, 6, args=(ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)))(hwnd, ctypes.byref(pointer)))
-        return COMPointer(self, pointer)
-
-    def condition(self, control_type):
-        value = VARIANT()
-        value.vt, value.integer = 3, control_type
-        pointer = ctypes.c_void_p()
-        self.check(self.method(self.obj, 23, args=(ctypes.c_int32, VARIANT, ctypes.POINTER(ctypes.c_void_p)))(30003, value, ctypes.byref(pointer)))
-        return COMPointer(self, pointer)
-
-    def findall(self, root, control_type):
-        condition = self.condition(control_type)
-        pointer = ctypes.c_void_p()
-        self.check(self.method(root, 6, args=(ctypes.c_int32, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)))(4, condition.pointer, ctypes.byref(pointer)))
-        array = COMPointer(self, pointer)
-        count = self.integer(array, 3)
-        if count > 4000:
-            raise NativeUIError('A árvore de acessibilidade está grande demais; reduza o histórico visível antes de iniciar.')
-        result = []
-        for index in range(count):
-            element = ctypes.c_void_p()
-            self.check(self.method(array, 4, args=(ctypes.c_int32, ctypes.POINTER(ctypes.c_void_p)))(index, ctypes.byref(element)))
-            result.append(COMPointer(self, element))
-        return result
-
-    def pattern(self, element, pattern_id):
-        iids = {10002:'a94cd8b1-0844-4cd6-9d2d-640537ab39e9',
-                10018:'828055ad-355b-4435-86d5-3b51c14a9b1b',
-                10014:'32eba289-3583-42c9-9c59-3b6d9a1e9b6a'}
-        iid = GUID.from_string(iids[pattern_id])
-        value = ctypes.c_void_p()
-        result = self.method(element, 14, args=(ctypes.c_int32, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)))(pattern_id, ctypes.byref(iid), ctypes.byref(value))
-        return COMPointer(self, value) if result >= 0 and value.value else None
-
-    def read_value(self, element):
-        # Value, Text and Legacy accessibility are standard native Windows patterns.
-        valor_vazio = None
-        for pattern_id, method in ((10002, 4), (10018, 8)):
-            pattern = self.pattern(element, pattern_id)
-            if pattern:
-                try:
-                    valor = self.string(pattern, method)
-                    if valor:
-                        return valor
-                    valor_vazio = valor
-                except NativeUIError:
-                    pass
-        text = self.pattern(element, 10014)
-        if text:
-            range_pointer = ctypes.c_void_p()
-            self.check(self.method(text, 7, args=(ctypes.POINTER(ctypes.c_void_p),))(ctypes.byref(range_pointer)))
-            text_range = COMPointer(self, range_pointer)
-            value = ctypes.c_void_p()
-            self.check(self.method(text_range, 12, args=(ctypes.c_int32, ctypes.POINTER(ctypes.c_void_p)))(-1, ctypes.byref(value)))
-            try:
-                return ctypes.wstring_at(value) if value.value else ''
-            finally:
-                if value.value:
-                    self.aut.SysFreeString(value)
-        return valor_vazio
-
-    def optional_string(self, pointer, method):
-        try:
-            return self.string(pointer, method)
-        except NativeUIError:
-            return ''
-
-    def info(self, pointer, control_type=None):
-        kind = control_type or self.integer(pointer, 21)
-        rect = self.rectangle(pointer)
-        try:
-            value = self.read_value(pointer) if kind == 50004 else None
-        except NativeUIError:
-            value = None
-        return Elemento(self.string(pointer, 23), kind, rect, bool(self.integer(pointer, 28)),
-                        bool(self.integer(pointer, 38)), value,
-                        self.optional_string(pointer, 29), self.optional_string(pointer, 31), self.optional_string(pointer, 46), pointer)
-
-    def nodes(self, hwnd):
-        root = self.root(hwnd)
-        documents = self.findall(root, 50030)
-        candidates = []
-        for doc in documents:
-            try:
-                name, rect = self.string(doc, 23), self.rectangle(doc)
-                if 'whatsapp' in normalizar(name) and rect[2]-rect[0] > 200 and rect[3]-rect[1] > 200:
-                    candidates.append(doc)
-            except NativeUIError:
-                continue
-        if len(candidates) != 1:
-            raise NativeUIError('O Chrome não expôs um único documento WhatsApp à acessibilidade. Ative a aba WhatsApp; esta versão não usará posições presumidas.')
-        result = []
-        for kind in (50000, 50003, 50004, 50007, 50009, 50011, 50020, 50025, 50026, 50032):
-            for ptr in self.findall(candidates[0], kind):
-                try:
-                    info = self.info(ptr, kind)
-                    if info.visivel:
-                        result.append(info)
-                except NativeUIError:
-                    continue
-        return result
-
-    def refresh(self, element):
-        return self.info(element.nativo, element.tipo)
-
-    def focused(self, element):
-        return bool(self.integer(element.nativo, 26))
-
-    def hit_test(self, element):
-        left, top, right, bottom = element.rect
-        pointer = ctypes.c_void_p()
-        point = POINT((left+right)//2, (top+bottom)//2)
-        self.check(self.method(self.obj, 7, args=(POINT, ctypes.POINTER(ctypes.c_void_p)))(point, ctypes.byref(pointer)))
-        hit = COMPointer(self, pointer)
-        equal = ctypes.c_int32()
-        self.check(self.method(self.obj, 3, args=(ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32)))(hit.pointer, element.nativo.pointer, ctypes.byref(equal)))
-        if equal.value:
-            return True
-        return bool(element.nome) and normalizar(self.string(hit, 23)) == normalizar(element.nome)
-
-    def close(self):
-        if self.inicializado:
-            for pointer in list(self.pointers):
-                pointer.close()
-            self.obj.close()
-            self.ole.CoUninitialize()
-            self.inicializado = False
 
 
 def gravar_bmp(destino, largura, altura, pixels):
@@ -671,6 +518,139 @@ def capturar_bmp(desktop, destino):
             user.ReleaseDC(None, screen)
 
 
+# Read-only DOM inspection. No click, key, focus, value assignment or dispatchEvent here.
+DOM_LEITURA = r"""
+const only = arguments[0];
+const show = e => {
+ if (!e || !e.isConnected) return null;
+ const r=e.getBoundingClientRect(), s=getComputedStyle(e);
+ if (!r.width || !r.height || s.display==='none' || s.visibility==='hidden') return null;
+ const edit=e.matches('input:not([type=hidden]), textarea, [contenteditable=true][role=textbox]');
+ const outgoing=e.matches('.message-out');
+ const role=e.getAttribute('role')||'';
+ let kind=edit?50004:(outgoing?50026:(role==='menuitem'?50011:(e.matches('button,[role=button],[tabindex="0"]')?50000:(e.matches('select,[role=combobox]')?50003:50020))));
+ let name=e.getAttribute('aria-label')||'';
+ if (!name && e.getAttribute('aria-labelledby')) name=e.getAttribute('aria-labelledby').split(/\s+/).map(id=>document.getElementById(id)?.innerText||'').join(' ');
+ if (!name && edit) name=[...(e.labels||[])].map(l=>l.innerText).join(' ')||e.getAttribute('placeholder')||'';
+ if (!name) name=e.getAttribute('title')||e.innerText||'';
+ const icon=e.querySelector('[data-icon]')?.getAttribute('data-icon')||e.getAttribute('data-icon')||'';
+ if (!name.trim() && /^(menu|more-vertical|overflow-menu)$/.test(icon)) name='Menu';
+ if (!name.trim() && /^(x|x-alt|close|cross)$/.test(icon)) name='Fechar';
+ if (!name.trim() && icon==='send') name='Enviar';
+ if (!name.trim() && /^(check|checkmark|checkmark-medium|done|save)$/.test(icon)
+     && r.top>innerHeight*.6 && !e.closest('label,[data-testid*=phone],[data-testid*=input]')) name='Salvar';
+ if (outgoing) name='Você: '+[...e.querySelectorAll('.selectable-text')].map(t=>t.innerText).join('\n');
+ const value=edit ? (e.matches('input,textarea')?e.value:e.innerText) : null;
+ let clipped=false;
+ const cx=(r.left+r.right)/2,cy=(r.top+r.bottom)/2;
+ for(let p=e.parentElement;p && p!==document.body;p=p.parentElement){
+  const ps=getComputedStyle(p),pr=p.getBoundingClientRect();
+  if(/auto|scroll|hidden|clip/.test(ps.overflowY) && (cy<pr.top||cy>pr.bottom))clipped=true;
+  if(/auto|scroll|hidden|clip/.test(ps.overflowX) && (cx<pr.left||cx>pr.right))clipped=true;
+ }
+ return {ref:e,name:name.trim(),kind,rect:[r.left,r.top,r.right,r.bottom],
+  enabled:!e.disabled && e.getAttribute('aria-disabled')!=='true',
+  offscreen:clipped||r.bottom<=0||r.top>=innerHeight||r.right<=0||r.left>=innerWidth,
+  value,id:outgoing?('message-out '+(e.closest('[data-id]')?.getAttribute('data-id')||'')):(e.getAttribute('data-testid')||e.id||''),
+  help:e.getAttribute('title')||'',aria:'invalid:'+e.getAttribute('aria-invalid')};
+};
+if (only) return show(only);
+const items=new Set(document.querySelectorAll('button,[role=button],[role=menuitem],[tabindex="0"],input:not([type=hidden]),textarea,[contenteditable=true][role=textbox],select,[role=combobox],.message-out,[role=heading],[role=alert],[role=status],[role=dialog],[role=alertdialog],[data-animate-modal-popup=true],[data-testid=popup-contents]'));
+// Visible phone/contact headings may be plain spans rather than semantic headings.
+for (const e of document.querySelectorAll('span,label,h1,h2,h3')) {
+ if (!e.children.length && /^(Novo contato|New contact|Criar contato|\+?55[\d\s().-]{10,})$/i.test((e.innerText||'').trim())) items.add(e);
+}
+return [...items].filter(e=>!e.closest('#side,#pane-side,.message-in') && (!e.closest('.message-out')||e.matches('.message-out'))).map(show).filter(Boolean);
+"""
+
+
+class LeitorSelenium:
+    def __init__(self, driver, desktop):
+        self.driver,self.desktop=driver,desktop
+
+    def executar_leitura(self, script, *args):
+        try:
+            return self.driver.execute_script(script,*args)
+        except Exception as erro:
+            raise NativeUIError('Falha na leitura da página pelo Selenium: '+str(erro)) from erro
+
+    def viewport(self):
+        m=self.executar_leitura('return {w:innerWidth,h:innerHeight,dpr:devicePixelRatio};')
+        x,y,w,h=self.desktop.client_rect()
+        escala=float(m['dpr'])
+        if escala<=0 or abs(w-float(m['w'])*escala)>5:
+            raise NativeUIError('Feche painéis laterais/DevTools do Chrome antes de usar os cliques nativos.')
+        topo=h-float(m['h'])*escala
+        if topo<0 or topo>220*self.desktop.dpi_scale():
+            raise NativeUIError('Área de página incompatível com a janela. Feche DevTools e painéis extras.')
+        return x,y+topo,escala
+
+    def elemento(self, data, viewport):
+        x,y,escala=viewport
+        rect=tuple(round(v*escala+(x if i%2==0 else y)) for i,v in enumerate(data['rect']))
+        return Elemento(data['name'],data['kind'],rect,data['enabled'],data['offscreen'],data['value'],data['id'],data['help'],data['aria'],data['ref'])
+
+    def nodes(self, hwnd):
+        viewport=self.viewport()
+        data=self.executar_leitura(DOM_LEITURA,None)
+        return [self.elemento(item,viewport) for item in data]
+
+    def refresh(self, elemento):
+        data=self.executar_leitura(DOM_LEITURA,elemento.nativo)
+        if not data:
+            raise NativeUIError('Controle saiu da tela: '+elemento.nome)
+        return self.elemento(data,self.viewport())
+
+    def focused(self, elemento):
+        return bool(self.executar_leitura('return document.hasFocus() && (document.activeElement===arguments[0] || arguments[0].contains(document.activeElement));',elemento.nativo))
+
+    def hit_test(self, elemento):
+        return bool(self.executar_leitura(r"""
+            const e=arguments[0],r=e.getBoundingClientRect();
+            const h=document.elementFromPoint((r.left+r.right)/2,(r.top+r.bottom)/2);
+            return !!h && (h===e || e.contains(h));
+        """,elemento.nativo))
+
+    def revelar(self, nomes):
+        # Scroll by a native wheel, never by setting DOM scrollTop/scrollIntoView.
+        aceitos={normalizar(n) for n in nomes}
+        candidatos=[e for e in self.nodes(self.desktop.janela) if normalizar(e.nome) in aceitos and e.habilitado and e.fora_tela]
+        if len(candidatos)!=1:
+            return False
+        e=candidatos[0]
+        box=self.executar_leitura(r"""
+            let p=arguments[0].parentElement;
+            while(p && p!==document.body){const s=getComputedStyle(p);if(p.scrollHeight>p.clientHeight && /auto|scroll/.test(s.overflowY))break;p=p.parentElement;}
+            const r=p?p.getBoundingClientRect():{left:0,top:0,right:innerWidth,bottom:innerHeight};
+            return [Math.max(0,r.left),Math.max(0,r.top),Math.min(innerWidth,r.right),Math.min(innerHeight,r.bottom),arguments[0].getBoundingClientRect().top];
+        """,e.nativo)
+        x,y,scale=self.viewport()
+        left,top,_,_=self.desktop.rect()
+        self.desktop.rect_anterior=self.desktop.rect()
+        px=round(x+(box[0]+box[2])/2*scale)-left
+        py=round(y+(box[1]+box[3])/2*scale)-top
+        self.desktop.rolar(px,py,480 if box[4]<box[1] else -480)
+        return True
+
+    def close(self):
+        self.driver.quit()
+
+
+def localizar_chromedriver():
+    import shutil
+    configurado=os.environ.get('WHATSAPP_CHROMEDRIVER')
+    if configurado and Path(configurado).is_file():
+        return configurado
+    caminho=shutil.which('chromedriver')
+    if caminho:
+        return caminho
+    cache=Path.home()/'.cache'/'selenium'/'chromedriver'
+    arquivos=list(cache.glob('**/chromedriver.exe')) if cache.exists() else []
+    if arquivos:
+        return str(max(arquivos,key=lambda p:p.stat().st_mtime))
+    raise RuntimeError('ChromeDriver existente não encontrado no PATH nem no cache do Selenium. Esta versão não baixa nem instala drivers automaticamente.')
+
+
 ADICIONAR = ('Adicionar aos contatos', 'Adicionar a contatos', 'Adicionar aos contactos', 'Adicionar contato', 'Add to contacts', 'Add contact')
 EDITAR = ('Editar contato', 'Editar contacto', 'Edit contact')
 CRIAR = ('Criar contato', 'Criar novo contato', 'Novo contato', 'Create contact', 'Create new contact', 'New contact')
@@ -697,20 +677,16 @@ class TelaNativa:
 
     @property
     def client(self):
-        if self.client_injetado is not None:
-            return self.client_injetado
-        if not hasattr(self.local, 'client'):
-            self.local.client = UIAWindows()
-        return self.local.client
+        if self.client_injetado is None:
+            raise NativeUIError('Conecte o Chrome pelo botão Chrome / QR antes de iniciar.')
+        return self.client_injetado
 
     def encerrar_thread(self):
-        if hasattr(self.local, 'client'):
-            self.local.client.close()
-            del self.local.client
+        pass
 
     def conectar(self):
         if not self.desktop.ativar('WhatsApp'):
-            raise RuntimeError('Abra uma única janela do Chrome com a aba WhatsApp ativa e tente conectar novamente.')
+            raise RuntimeError('Não foi possível ativar a janela vinculada. Use Chrome / QR para iniciar o navegador controlado.')
         self.desktop.proteger()
 
     def snapshot(self):
@@ -760,7 +736,12 @@ class TelaNativa:
         self.log('Clique nativo no controle: ' + (atual.nome or 'sem nome'))
 
     def clicar(self, nomes, segundos=10, tipos=(50000,50011)):
-        elemento = self.aguardar(lambda: self.buscar(nomes, tipos), segundos, 'localizar ' + '/'.join(nomes))
+        def localizar():
+            elemento = self.buscar(nomes, tipos)
+            if elemento is None and hasattr(self.client, 'revelar'):
+                self.client.revelar(nomes)
+            return elemento
+        elemento = self.aguardar(localizar, segundos, 'localizar ' + '/'.join(nomes))
         self.clicar_elemento(elemento)
         return elemento
 
@@ -780,7 +761,7 @@ class TelaNativa:
     def ler(self, elemento):
         atual = self.client.refresh(elemento)
         if atual.valor is None:
-            raise NativeUIError('O Chrome não expôs o valor deste campo à acessibilidade: ' + elemento.nome)
+            raise NativeUIError('Selenium não conseguiu ler o valor deste campo: ' + elemento.nome)
         return str(atual.valor)
 
     def digitar(self, elemento, texto, tab=True):
@@ -854,7 +835,7 @@ class TelaNativa:
             if self.aviso_recusa(elementos):
                 return 'recusado'
             return 'conversa' if self.campo_mensagem(elementos) else False
-        return self.aguardar(resposta, 90, 'abrir destinatário na acessibilidade')
+        return self.aguardar(resposta, 90, 'abrir destinatário pela leitura Selenium')
 
     def telefone_confirmado(self, numero, elementos=None):
         elementos = self.snapshot() if elementos is None else elementos
@@ -889,7 +870,7 @@ class TelaNativa:
     def validar_formulario(self, numero):
         elementos = self.snapshot()
         if not self.telefone_confirmado(numero, elementos):
-            raise NativeUIError('O telefone/país do formulário não corresponde exatamente ao CSV, ou o Chrome não expôs o valor. Cadastro bloqueado.')
+            raise NativeUIError('O telefone/país do formulário não corresponde exatamente ao CSV, ou a leitura não expôs o valor. Cadastro bloqueado.')
         for e in elementos:
             if e.tipo == 50004 and ('invalid=true' in normalizar(e.aria) or 'invalid:true' in normalizar(e.aria)):
                 raise NativeUIError('A interface sinaliza campo inválido: ' + e.nome)
@@ -936,11 +917,20 @@ class TelaNativa:
                 mensagens.append(texto_comparavel(e.nome))
         return mensagens
 
+    def mensagens_saida_identificadas(self):
+        result={}
+        for e in self.snapshot():
+            identificador=e.automation_id.strip()
+            if e.tipo in (50007,50025,50026) and identificador and identificador!='message-out' and ('message-out' in identificador or 'outgoing' in identificador):
+                result[identificador]=texto_comparavel(e.nome)
+        return result
+
     def save_screenshot(self, destino):
         return capturar_bmp(self.desktop, Path(destino).with_suffix('.bmp'))
 
     def quit(self):
-        self.encerrar_thread()
+        if self.client_injetado is not None and hasattr(self.client_injetado,'close'):
+            self.client_injetado.close()
 
 
 class App:
@@ -1298,17 +1288,47 @@ class App:
 
     def chrome(self):
         if not sistema_windows():
-            messagebox.showerror('Windows necessário', 'Este script usa apenas a biblioteca padrão do Python e as APIs nativas do Windows. Execute no Windows com o Chrome visível.')
+            messagebox.showerror('Windows necessário','Esta versão usa mouse e teclado nativos do Windows.')
             return
-        if self.ocupado:
-            return
-        try:
-            if self.driver is None:
-                self.driver = TelaNativa(self.parar, self.log)
-            self.driver.conectar()
-            self.log('Chrome normal conectado. Sem instalação de pacotes, sem calibração e sem WebDriver.')
-        except Exception as erro:
-            messagebox.showerror('Chrome / QR', str(erro) + '\nAbra manualmente web.whatsapp.com no Chrome, faça login e deixe a aba ativa.')
+        def abrir():
+            if self.driver is not None:
+                self.driver.conectar()
+                self.log('Janela do Chrome já vinculada. Faça login por QR se necessário.')
+                return
+            try:
+                from selenium import webdriver
+                from selenium.webdriver.chrome.service import Service
+            except ImportError as erro:
+                raise RuntimeError('Selenium não está instalado neste Python. A versão híbrida precisa do Selenium já usado nas versões anteriores; não instalará nada automaticamente.') from erro
+            desktop=DesktopWindows()
+            anteriores={w['hwnd'] for w in desktop.listar_janelas()}
+            opcoes=webdriver.ChromeOptions()
+            perfil=Path.home()/'.whatsapp_csv_sender'/'chrome_native_hybrid'
+            opcoes.add_argument('--user-data-dir='+str(perfil))
+            if os.environ.get('WHATSAPP_CHROME'):
+                opcoes.binary_location=os.environ['WHATSAPP_CHROME']
+            raw=webdriver.Chrome(service=Service(executable_path=localizar_chromedriver()),options=opcoes)
+            try:
+                tela=TelaNativa(self.parar,self.log,desktop=desktop,client=LeitorSelenium(raw,desktop))
+                pid=raw.capabilities.get('goog:processID')
+                def janela_criada():
+                    janelas=desktop.listar_janelas()
+                    candidatos=[w for w in janelas if pid and w['pid']==int(pid)]
+                    if len(candidatos)!=1:
+                        candidatos=[w for w in janelas if w['hwnd'] not in anteriores]
+                    return candidatos[0] if len(candidatos)==1 else False
+                escolhida=tela.aguardar(janela_criada,10,'vincular a nova janela criada pelo Selenium')
+                desktop.vincular(escolhida['hwnd'],escolhida['pid'])
+                tela.conectar()
+                desktop.atalho(0x11,0x4C)
+                desktop.escrever('https://web.whatsapp.com/',self.parar)
+                desktop.atalho(0x0D)
+                self.driver=tela
+                self.log('Chrome vinculado por janela/processo. Selenium só lê; clique, rolagem e teclas usam SendInput. Faça login por QR e aguarde as conversas antes de Iniciar.')
+            except Exception:
+                raw.quit()
+                raise
+        self.executar(abrir)
 
     def abrir_e_detectar(self, numero):
         self.numero_atual = numero
@@ -1316,7 +1336,7 @@ class App:
         self.definir_etapa(f'1/5: abrindo +{numero} com teclas do Windows...')
         if self.driver.abrir_numero(numero) == 'recusado':
             raise NumeroRecusado('WhatsApp exibiu aviso de número inválido ou não registrado.')
-        self.definir_etapa('2/5: identificando Adicionar/Editar pela acessibilidade do Windows...')
+        self.definir_etapa('2/5: lendo Adicionar/Editar com Selenium; ações pelo Windows...')
         estado = self.driver.estado_contato()
         if estado == 'existente':
             self.driver.desktop.atalho(0x1B)
@@ -1332,7 +1352,7 @@ class App:
     def cadastrar(self, contato):
         tela, nome, numero = self.driver, contato['name'], contato['phone']
         for tentativa in range(2):
-            self.definir_etapa('3/5: localizando o campo Nome pela acessibilidade...')
+            self.definir_etapa('3/5: localizando Nome pela leitura e digitando pelo Windows...')
             def formulario():
                 campo = tela.campo_nome()
                 if campo:
@@ -1393,14 +1413,14 @@ class App:
             raise RuntimeError('Existe rascunho. Não será apagado ou misturado.')
         mensagem = texto.replace('\r\n','\n').replace('\r','\n')
         esperado = texto_comparavel(mensagem)
-        antes = sum(e.count(esperado) for e in tela.mensagens_saida())
+        antes = tela.mensagens_saida_identificadas()
         tela.digitar(campo,mensagem,tab=False)
         self.conferir_parada()
         self.envio_pendente = numero
         try:
             tela.clicar(('Enviar','Send'),5)
-            tela.aguardar(lambda: sum(e.count(esperado) for e in tela.mensagens_saida()) > antes,30,
-                          'confirmar nova mensagem com marcador de saída')
+            tela.aguardar(lambda: any(chave not in antes and esperado in texto for chave,texto in tela.mensagens_saida_identificadas().items()),30,
+                          'confirmar novo identificador de mensagem de saída com o texto enviado')
         except Exception as erro:
             raise RuntimeError('ENVIO INCERTO. Não repetir automaticamente; confira manualmente a conversa.') from erro
         self.envio_pendente = None

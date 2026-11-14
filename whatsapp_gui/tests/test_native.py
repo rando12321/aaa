@@ -83,3 +83,31 @@ class NativeKeyboardTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'janela foi movida'):
             desktop.clicar(50,25)
         desktop.api.SendInput.assert_not_called()
+
+    def test_bound_window_does_not_depend_on_title_or_unique_whatsapp(self):
+        teclado=self.keyboard()
+        teclado.pid=444
+        teclado.listar_janelas=lambda:[{'hwnd':123,'pid':444,'titulo':'Nova guia - Google Chrome'},
+                                      {'hwnd':999,'pid':555,'titulo':'WhatsApp - Google Chrome'}]
+        self.assertTrue(teclado.ativar('WhatsApp'))
+        self.assertEqual(teclado.janela,123)
+
+    def test_reused_window_handle_with_different_process_is_rejected(self):
+        teclado=self.keyboard()
+        teclado.pid=444
+        teclado.listar_janelas=lambda:[{'hwnd':123,'pid':777,'titulo':'WhatsApp'}]
+        with self.assertRaisesRegex(RuntimeError,'foi fechada'):
+            teclado.ativar('WhatsApp')
+        teclado.api.SendInput.assert_not_called()
+
+    def test_foreground_failure_has_specific_error(self):
+        from unittest.mock import patch
+        teclado=self.keyboard()
+        teclado.pid=444
+        teclado.listar_janelas=lambda:[{'hwnd':123,'pid':444,'titulo':'WhatsApp'}]
+        teclado.api.GetForegroundWindow.return_value=999
+        teclado.api.IsIconic.return_value=False
+        with patch('app.time.monotonic',side_effect=[0,4]):
+            with self.assertRaisesRegex(RuntimeError,'Windows não colocou'):
+                teclado.ativar('WhatsApp')
+        teclado.api.SendInput.assert_not_called()

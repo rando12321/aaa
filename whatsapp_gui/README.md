@@ -1,51 +1,49 @@
-# WhatsApp — um script Python, sem instalar pacotes nem calibrar
+# WhatsApp híbrido — Selenium lê; Windows clica e digita
 
-A **V17** usa somente a biblioteca padrão do Python e APIs presentes no Windows. O aplicativo inteiro está em **`app.py`**. Não requer `pip`, OpenCV, NumPy, Pillow, Selenium, OCR, extensão, serviço de IA ou arquivos de calibração.
+A **V18** mantém todo o aplicativo em **`app.py`** e usa a combinação solicitada:
 
-## Abrir
+- **Selenium** inicia o Chrome controlado e lê controles, textos, valores, posição e resultado das ações.
+- **Windows SendInput** envia todos os cliques, rolagens, atalhos e caracteres. Não são usados `WebElement.click()`, `send_keys()`, `ActionChains`, atribuição de valores no DOM ou `dispatchEvent`.
+- Não usa OpenCV, OCR externo, pyautogui, pywin32 ou comtypes. Não precisa calibrar imagens.
 
-Requer **Windows 10/11**, Python 3.12+ com Tkinter (instalador padrão do Python para Windows) e Chrome normal.
+Isso não garante ser indetectável: o Chrome continua sendo iniciado pelo Selenium. Os erros anteriores não comprovam que o WhatsApp estivesse bloqueando a digitação por detectar automação.
 
-1. Baixe `app.py` e execute `python app.py` ou `py app.py`.
-2. Abra manualmente `https://web.whatsapp.com/` no Chrome normal e faça login pelo QR.
-3. Deixe a aba WhatsApp ativa em uma única janela. Clique **Chrome / QR** no aplicativo para conectar essa janela.
-4. Carregue o CSV, informe a mensagem e o intervalo e clique **Iniciar**.
+## Requisitos existentes
 
-Não há etapa de instalação de bibliotecas nem de seleção de imagens. Nenhum perfil novo de navegador é criado; o login é o do Chrome normal. Mantenha a janela do Chrome visível e não use mouse/teclado durante o lote. Se outra janela ganhar foco, as próximas teclas e cliques são bloqueados.
+Windows 10/11, Python com Tkinter, **Selenium já instalado** e **ChromeDriver compatível já disponível**, como nas primeiras versões do aplicativo.
 
-## Como funciona
+**O script não instala bibliotecas e não baixa drivers automaticamente.** Reutiliza `WHATSAPP_CHROMEDRIVER`, um ChromeDriver encontrado no PATH ou no cache `~/.cache/selenium/chromedriver`. Se não houver Selenium/driver no Python usado, para com uma mensagem específica. A versão híbrida não pode executar sem esses componentes existentes.
 
-O script chama **UI Automation do Windows por `ctypes`**, obtendo nomes, estados, valores e retângulos dos controles que o Chrome expõe. Os cliques e a digitação usam **Windows SendInput**, com confirmação de foco e conferência do valor digitado. Não injeta JavaScript na página, não usa WebDriver e não se conecta a API de IA externa.
+## Executar
 
-As assinaturas COM seguem `uiautomationclient.h`: IUIAutomation, IUIAutomationElement, ValuePattern, TextPattern e LegacyIAccessiblePattern. O COM é inicializado e encerrado no thread que o utiliza; não são instalados `comtypes`, `pywin32` ou wrappers de automação.
+1. Execute `py app.py` ou `python app.py`.
+2. Clique **Chrome / QR**. O Selenium abre uma janela com perfil separado em `~/.whatsapp_csv_sender/chrome_native_hybrid`.
+3. Faça login por QR nessa janela, se necessário, e aguarde as conversas. O login é mantido nesse perfil.
+4. Carregue CSV `phone,name`, informe mensagem/espera e clique **Iniciar**.
 
-**Limitação necessária:** o Chrome precisa expor o documento e os controles à acessibilidade do Windows. Nem todas as versões/interfaces fazem isso da mesma forma. Se um controle não tiver identificação acessível ou o valor do campo não puder ser lido, o script interrompe com diagnóstico. Não promete funcionamento universal nem automação indetectável. A mudança de tecnologia não comprova que os erros anteriores fossem causados por detecção do Selenium.
+A janela é vinculada pelo identificador e processo da janela recém-criada, não pela exigência de haver apenas um título “WhatsApp”. Outras janelas do navegador podem permanecer abertas. Se o Windows recusar primeiro plano, o erro pede para clicar na janela vinculada; nenhuma tecla é enviada a outra janela.
 
-## Recursos mantidos
+Mantenha esse Chrome visível, com a aba WhatsApp ativa, sem DevTools ou painel lateral do navegador. Não use mouse/teclado durante o lote. As posições dos controles vêm da leitura atual e são convertidas para pixels nativos com DPI/zoom e dimensões da área cliente; não são coordenadas fixas ou calibradas manualmente. Painéis laterais incompatíveis bloqueiam cliques. O centro do controle precisa estar desobstruído na página e o campo precisa ter foco antes de receber caracteres.
 
-- GUI Tkinter, CSV `phone,name`, vírgula/ponto e vírgula, UTF-8, telefones como texto, deduplicação, exclusão de `11999999999` e sua versão internacional, normalização brasileira +55.
-- Nomes automáticos curtos e únicos, personalização `{name}`, mensagem com várias linhas, Parar e logs por etapa.
-- Abre o número diretamente por URL digitada com teclado nativo. Uma recusa exige texto real da interface; timeout é inconclusivo.
-- Contato salvo precisa de Adicionar/Editar no menu/dados do contato, sem depender do nome do perfil. Existente é pulado sem mensagem e sem espera.
-- Nome é digitado com teclas nativas e conferido. Telefone/país precisam corresponder ao CSV; não considera números com/sem nono dígito iguais por suposição. Um número visível em outra parte do histórico não comprova o telefone do formulário.
-- Salvar é procurado por até 5 segundos. Sem o controle, ou com validação inválida antes de salvar, fecha pelo X, confirma Descartar e reabre pela interface uma única vez, sem F5 nessa recuperação. Não repete um clique em Salvar com resultado incerto.
-- Cadastro exige nova notificação de sucesso ou confirmação de Editar contato antes de liberar o envio ao mesmo número. A verificação posterior não aplica SKIP ao contato cadastrado naquele lote.
-- Rascunho existente é preservado e bloqueia o envio. A mensagem é conferida antes do clique em Enviar. A confirmação exige nova ocorrência do texto num elemento identificado como mensagem de saída; se o Chrome não expuser esse marcador, o resultado será **envio incerto**, sem nova tentativa automática. Campo vazio sozinho não confirma envio e não se afirma entrega.
-- Espera base + inteiro aleatório de 60 a 180 segundos somente após envio, nunca após existente/recusado nem após o último contato.
-- Chrome normal permanece aberto ao fechar o aplicativo. Não foi adicionada retomada automática entre execuções nem sincronização da agenda do celular.
+## Comportamento
 
-## Diagnósticos
+- CSV UTF-8 com vírgula/ponto e vírgula, leitura como texto, deduplicação, exclusão de `11999999999` e versão internacional, normalização brasileira +55 sem inventar nono dígito.
+- Nomes automáticos curtos e únicos, `{name}`, várias linhas, Parar e logs por etapa.
+- O número é aberto por Ctrl+L, URL digitada e Enter **pelo Windows**. O Selenium apenas observa a transição e o resultado.
+- Contato existente exige Adicionar/Editar na interface; nome de perfil não basta. Existente é pulado sem mensagem e sem espera.
+- Nome digitado e valor conferido; país/telefone precisam corresponder ao CSV. Número de outra região do histórico não comprova o telefone do formulário.
+- Se Salvar estiver fora da área rolável visível, a rolagem é feita pela roda nativa do mouse. Sem Salvar em 5 segundos ou com validação inválida antes de salvar, fecha no X, confirma Descartar e reabre uma vez pela interface, sem F5 nessa recuperação. Não repete clique em Salvar com resultado incerto.
+- Cadastro exige nova notificação de sucesso ou confirmação posterior de Editar contato. O contato recém-cadastrado segue ao envio no mesmo lote, sem SKIP nessa etapa.
+- Rascunho é preservado e bloqueia o envio. A mensagem digitada é lida e conferida antes de clicar Enviar uma única vez. Confirmação exige **novo identificador de mensagem de saída** com o texto esperado, não apenas mensagem antiga semelhante ou campo vazio. Entrega não é afirmada.
+- Espera base + inteiro aleatório 60–180 segundos apenas após envio, nunca após existente/recusado nem após o último contato. Resultado de envio incerto interrompe e não é repetido automaticamente.
+- Não foi adicionada retomada automática entre execuções nem sincronização da agenda.
 
-Falhas geram JSON dos controles acessíveis e captura **BMP**, ambos em `diagnosticos/`, ignorada pelo Git. A captura usa GDI nativo e o gravador BMP é implementado com `ctypes` e `struct`. Esses arquivos podem conter dados pessoais; não publique sessão ou diagnósticos.
+Ao fechar o aplicativo, encerra apenas a sessão de Chrome criada pelo Selenium, preservando outras janelas do usuário. Falhas geram diagnóstico local JSON/BMP em `diagnosticos/`, ignorada pelo Git. Proteja esses arquivos: podem conter dados pessoais.
 
-## Validação
+## Validação e limites
 
-Os testes são executáveis com Python sem instalar pacotes:
+Foram testados CSV/esperas, comandos nativos e vinculação HWND/processo com APIs simuladas, conversão CSS/DPI para pixels, ausência de instalação automática e os fluxos com provedores simulados. Os testes opcionais de DOM executam os scripts de leitura no Chromium e simulam o transporte das ações nativas: leitura sem modificar a página, cadastro→envio, existente e rolagem para Salvar.
 
-```sh
-python -m unittest discover -s tests -v
-```
+**Não houve validação de ponta a ponta com ChromeDriver, SendInput, geometria real da janela, GUI e conta autenticada no Windows nesta sessão Linux.** A versão implementa a combinação solicitada, mas o resultado real ainda precisa ser confirmado no computador de uso. Se o nome ou estado do controle não puder ser lido com segurança, o programa interrompe com diagnóstico.
 
-Foram verificados imports exclusivamente da biblioteca padrão em ambiente Python limpo, CSV e esperas, layout binário das estruturas Windows, sequências de teclas/mouse com API simulada, gravação BMP e fluxo com provedor de acessibilidade simulado: cadastrar→enviar, existente, rascunho, envio incerto, recusa, ambiguidade, controle coberto, telefone divergente e X→Descartar→reabrir.
-
-**Não houve teste real de COM/UI Automation, SendInput, captura GDI, GUI ou conta autenticada no Windows nesta sessão Linux.** O script foi implementado e testado em simulação; o fluxo real ainda precisa ser validado no computador de uso. Não considere o processo de ponta a ponta confirmado por esses testes.
+Para desenvolvimento, `python -m unittest discover -s tests -v` executa os testes básicos sem pacotes extras; os testes DOM são marcados como pulados se Playwright não estiver disponível. `requirements-dev.txt` é apenas para o ambiente de desenvolvimento, não um instalador automático do aplicativo.

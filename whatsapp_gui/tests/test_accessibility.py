@@ -7,12 +7,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-from app import (App, Elemento, GUID, RECT, POINT, VARIANT, NativeUIError,
+from app import (App, Elemento, RECT, POINT, NativeUIError,
                  TelaNativa, correspondencia_nomes, gravar_bmp)
 
 
 class BindingTests(unittest.TestCase):
-    def test_only_standard_library_imports(self):
+    def test_no_extra_graphics_or_input_packages(self):
         source = Path(__file__).resolve().parents[1] / 'app.py'
         tree = ast.parse(source.read_text())
         names = set()
@@ -21,16 +21,11 @@ class BindingTests(unittest.TestCase):
                 names.update(alias.name.split('.')[0] for alias in node.names)
             elif isinstance(node, ast.ImportFrom):
                 names.add(node.module.split('.')[0])
-        self.assertTrue(names <= sys.stdlib_module_names, names - sys.stdlib_module_names)
+        self.assertTrue(names <= sys.stdlib_module_names | {'selenium'}, names - sys.stdlib_module_names - {'selenium'})
 
     def test_windows_abi_layout(self):
         self.assertEqual(ctypes.sizeof(RECT), 16)
         self.assertEqual(ctypes.sizeof(POINT), 8)
-        self.assertEqual(ctypes.sizeof(GUID), 16)
-        self.assertEqual(ctypes.sizeof(VARIANT), 24 if ctypes.sizeof(ctypes.c_void_p)==8 else 16)
-        guid = GUID.from_string('30cbe57d-d9d0-452a-ab13-7ac5ac4825ee')
-        self.assertEqual(guid.d1, 0x30cbe57d)
-        self.assertEqual(list(guid.d4), [0xab,0x13,0x7a,0xc5,0xac,0x48,0x25,0xee])
 
     def test_bmp_writer_without_pillow(self):
         with tempfile.TemporaryDirectory() as tmp:

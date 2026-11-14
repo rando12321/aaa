@@ -1,1 +1,2 @@
-# Nenhum pacote externo. O aplicativo usa somente a biblioteca padrão do Python.
+# Componente já existente necessário ao modo híbrido. O script não instala nada.
+selenium==4.38.0
