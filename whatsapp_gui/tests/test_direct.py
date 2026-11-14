@@ -108,7 +108,7 @@ class BatchTests(unittest.TestCase):
         field=Mock();field.get_attribute.return_value=''
         self.app.campo_mensagem=Mock(return_value=field)
         self.app.driver.execute_script.side_effect=['','Olá, Ana!']
-        self.app.mensagens_saida=Mock(side_effect=[{},outgoing])
+        self.app.mensagens_saida=Mock(side_effect=AssertionError('Não deve conferir mensagens de saída'))
         def wait(fn,seconds=30):
             value=fn(self.app.driver)
             if not value:raise RuntimeError('Sem confirmação')
@@ -116,20 +116,30 @@ class BatchTests(unittest.TestCase):
         self.app.esperar=wait
         return field
 
-    def test_new_outgoing_bubble_is_required_before_writing_txt(self):
+    def test_enter_command_records_number_without_reading_outgoing_bubbles(self):
         field=self.setup_actual_send({'new-id':'Olá, Ana!'})
         self.run_batch()
         self.assertEqual(self.app.historico.ler(),{'5593984108321'})
         self.assertFalse(self.app.envio_incerto)
         self.assertTrue(any(call.args==('\ue007',) for call in field.send_keys.call_args_list))
 
-    def test_empty_composer_without_new_bubble_is_not_recorded(self):
-        self.setup_actual_send({})
-        with self.assertRaisesRegex(RuntimeError,'ENVIO INCERTO'):self.run_batch()
-        self.assertTrue(self.app.envio_incerto)
-        self.assertEqual(self.app.historico.ler(),set())
+    def test_no_outgoing_message_does_not_block_recording_or_continue(self):
+        field=self.setup_actual_send({})
+        self.run_batch()
+        self.assertFalse(self.app.envio_incerto)
+        field.send_keys.assert_called_once_with('\ue007')
+        self.app.mensagens_saida.assert_not_called()
+        self.assertEqual(self.app.historico.ler(),{'5593984108321'})
 
-    def test_multiline_message_is_entered_and_recorded_after_confirmation(self):
+    def test_failed_enter_command_does_not_record_number(self):
+        field=self.setup_actual_send({})
+        field.send_keys.side_effect=RuntimeError('Falha ao pressionar Enter')
+        with self.assertRaisesRegex(RuntimeError,'Falha ao pressionar Enter'):
+            self.run_batch()
+        self.assertEqual(self.app.historico.ler(),set())
+        self.assertTrue(self.app.envio_incerto)
+
+    def test_multiline_message_is_entered_and_recorded_after_enter(self):
         texto='Olá, Ana!\nSegunda linha'
         field=self.setup_actual_send({'new-id':texto})
         self.app.mensagem.get.return_value='Olá, {name}!\nSegunda linha'

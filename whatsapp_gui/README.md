@@ -27,17 +27,16 @@ Se o campo já contiver um rascunho igual à mensagem configurada, ele é reutil
 
 Quando o campo está vazio, a mensagem é inserida inteira pelo evento de texto do Chrome (`Input.insertText`), suportando Unicode e várias linhas sem pressionar Enter entre as linhas. A leitura do editor considera emojis em imagens, espaços não separáveis e quebras finais do DOM; preserva palavras, caracteres de composição de emojis e linhas internas. Diferença real ou texto faltando continua bloqueando o envio.
 
-O número só é acrescentado ao arquivo depois de observar uma **nova mensagem de saída com identificador e texto correspondentes**. Campo vazio sozinho não comprova envio. O arquivo é descarregado e sincronizado em disco após cada registro; não é preciso esperar acabar o lote. Não significa confirmação de entrega ao destinatário.
+Na V25, o número é acrescentado ao TXT **imediatamente após o comando Enter retornar sem erro**. Não procura bolha de saída, não aguarda o campo esvaziar e não verifica envio ou entrega. Portanto, o TXT registra comandos de envio executados, não mensagens comprovadamente enviadas/entregues. O arquivo é descarregado e sincronizado em disco após cada registro.
 
-Recusa do WhatsApp, falha ou resultado incerto não entram no TXT. Se o envio ficar incerto ou se falhar a gravação depois de enviar, o lote interrompe e novas tentativas ficam bloqueadas nessa sessão. **Antes de reiniciar, confira a conversa:** se foi enviado, coloque o número em `enviados.txt` manualmente. Não apague o histórico para retomar; isso permite reenviar aos números removidos. Use uma única instância do programa por pasta/histórico.
-
+Recusa do WhatsApp ou falha antes do comando Enter não entra no TXT. Uma exceção no próprio comando Enter ou na gravação interrompe o lote para evitar repetição imediata. Use uma única instância por pasta/histórico. Não apague o TXT entre execuções.
 A espera continua sendo base + 60–180 segundos, apenas após enviar, quando ainda houver outro número não registrado para processar. Recusados e números do TXT passam imediatamente. Parar interrompe esperas/próximas etapas.
 
 Capturas de falhas permanecem em `diagnosticos/`. O TXT e diagnósticos contêm dados pessoais e estão ignorados pelo Git.
 
 ## Verificação
 
-Testes cobrem persistência/normalização do TXT, arquivo sem quebra de linha final, rejeição de histórico inválido, pular antes da navegação, retomada em nova execução, falta de confirmação, mensagem multilinha, erro de gravação e recusa. Há teste opcional do script de confirmação em Chromium usando Playwright apenas no desenvolvimento.
+Testes cobrem persistência/normalização do TXT, arquivo sem quebra de linha final, rejeição de histórico inválido, pular antes da navegação, retomada em nova execução, registro após Enter sem mensagem de saída, falha no próprio Enter, mensagem multilinha, erro de gravação e recusa. Há teste opcional do script de confirmação em Chromium usando Playwright apenas no desenvolvimento.
 
 ```sh
 python -m unittest discover -s tests -v

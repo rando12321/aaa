@@ -26,7 +26,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-VERSAO = 'V24-reutilizar-rascunho-correto'
+VERSAO = 'V25-enviar-sem-conferir-saida'
 ARQUIVO_ENVIADOS = Path(__file__).resolve().parent / 'enviados.txt'
 
 IGNORADOS = {"11999999999", "5511999999999"}
@@ -611,31 +611,14 @@ class App:
                 self.esperar(conferir,5)
             except Exception as erro:
                 raise RuntimeError(f'O texto inserido não foi confirmado. Esperado: {len(esperado)} caracteres; lido: {len(lido[0])}. Rascunho preservado, sem envio e sem registro no TXT.') from erro
-        anteriores=self.mensagens_saida()
         self.conferir_parada()
-        self.definir_etapa('Enviando uma vez e confirmando nova mensagem de saída...')
+        self.definir_etapa('Pressionando Enter uma vez, sem conferir a mensagem de saída...')
         self.envio_incerto=True
         campo.send_keys(Keys.ENTER)
-        def confirmado(driver):
-            return any(chave not in anteriores and valor==esperado for chave,valor in self.mensagens_saida().items())
-        try:
-            self.esperar(confirmado,30)
-        except Exception as erro:
-            raise RuntimeError('ENVIO INCERTO: não foi confirmado e não será registrado no TXT. Confira a conversa antes de tentar novamente.') from erro
-        self.log('Nova mensagem de saída confirmada; entrega não confirmada.')
+        self.log('Comando Enter executado. Sem verificação de envio ou entrega; seguindo para registrar o número no TXT.')
 
     def ler_mensagem(self,campo):
         return normalizar_mensagem(self.driver.execute_script(SCRIPT_TEXTO_MENSAGEM+'return textoMensagem(arguments[0]);',campo))
-
-    def mensagens_saida(self):
-        linhas=self.driver.execute_script(SCRIPT_TEXTO_MENSAGEM+r"""
-            return [...document.querySelectorAll('#main .message-out')].map(e=>{
-                const row=e.closest('[data-id]')||e.querySelector('[data-id]');
-                const text=[...e.querySelectorAll('.selectable-text')].map(textoMensagem).join('\n');
-                return [row&&row.getAttribute('data-id'),text];
-            }).filter(([id])=>id);
-        """)
-        return {chave:normalizar_mensagem(texto) for chave,texto in linhas}
 
     def aguardar_proximo(self, base):
         extra = random.randint(60, 180)
@@ -725,7 +708,7 @@ class App:
                     self.historico.registrar(numero)
                 except Exception as erro:
                     self.envio_incerto=True
-                    raise RuntimeError('Mensagem confirmada, mas falhou a gravação no enviados.txt. Não repetir; confira a conversa e registre esse número manualmente.') from erro
+                    raise RuntimeError('Comando de envio executado, mas falhou a gravação no enviados.txt. Não repetir; confira a conversa e registre esse número manualmente.') from erro
                 self.envio_incerto=False
                 enviados+=1
                 self.log('Registrado em enviados.txt: '+numero)

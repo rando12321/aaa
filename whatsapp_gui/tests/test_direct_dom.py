@@ -26,15 +26,11 @@ class MessageDOMTests(unittest.TestCase):
         self.app.driver.execute_script.side_effect=execute
     def tearDown(self):self.page.close()
 
-    def test_confirmation_reads_message_id_and_multiline_text(self):
-        self.page.set_content('<div id="main"><div data-id="unique-id" class="message-out"><span class="selectable-text">Olá, Ana!<br>Segunda linha</span></div></div>')
-        self.assertEqual(self.app.mensagens_saida(),{'unique-id':'Olá, Ana!\nSegunda linha'})
-
     def test_editor_images_nbsp_and_blank_paragraphs_preserve_message(self):
         self.page.set_content('<div id="editor" contenteditable="true"><p>Olá&nbsp;Ana<img alt=" 👩‍💻"><br></p><p><br></p><p>Segunda linha</p></div>')
         self.assertEqual(self.app.ler_mensagem(self.field),'Olá Ana 👩‍💻\n\nSegunda linha')
 
-    def test_browser_insert_multiline_emoji_then_confirm_actual_outgoing(self):
+    def test_browser_insert_multiline_emoji_then_press_enter_once(self):
         self.page.set_content(r'''<div id="main"><div id="messages"></div><footer><div id="editor" contenteditable="true" role="textbox"></div></footer></div>
         <script>const editor=document.querySelector('#editor');let model='';editor.addEventListener('input',e=>{if(e.inputType==='insertText')model+=e.data===null?'\n':e.data;});editor.addEventListener('keydown',e=>{
             if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();const row=document.createElement('div');row.className='message-out';row.dataset.id='new-id';
@@ -52,7 +48,7 @@ class MessageDOMTests(unittest.TestCase):
         self.app.enviar({'phone':self.app.numero_atual,'name':'Ana'},text)
         self.assertEqual(self.page.evaluate('window.sent'),1)
         self.assertEqual(self.page.evaluate('window.lastSentText'),text)
-        self.assertEqual(self.app.mensagens_saida(),{'new-id':normalizar_mensagem(text)})
+        self.assertEqual(normalizar_mensagem(self.page.locator('.message-out .selectable-text').inner_text()),normalizar_mensagem(text))
 
     def test_matching_existing_draft_sends_once_without_inserting_again(self):
         self.page.set_content(r"""<div id="main"><div id="messages"></div><footer><div id="editor" contenteditable="true" role="textbox">Olá, Ana!</div></footer></div>
@@ -65,4 +61,4 @@ class MessageDOMTests(unittest.TestCase):
         self.app.enviar({'phone':self.app.numero_atual,'name':'Ana'},'Olá, Ana!')
         self.assertEqual(self.page.evaluate('window.sent'),1)
         self.app.driver.execute_cdp_cmd.assert_not_called()
-        self.assertEqual(self.app.mensagens_saida(),{'draft-sent':'Olá, Ana!'})
+        self.assertEqual(self.page.locator('.message-out .selectable-text').inner_text(),'Olá, Ana!')
